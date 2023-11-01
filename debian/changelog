@@ -1,5 +1,217 @@
-template-repository (1.0-1) unstable; urgency=medium
+poetry (1.6.1+dfsg-2) unstable; urgency=medium
 
-  * Initial release
+  * d/rules: Skip the next tests that use internet (Closes: #1050688):
+   - test_installer_with_pypi_repository
+   - test_prepare_directory_editable
+   - test_prepare_directory
+   - test_prepare_directory_with_extensions
 
- -- Tsic404 <liuheng@deepin.org>  Sat, 28 Jan 2023 13:46:49 +0800
+ -- Emmanuel Arias <eamanu@debian.org>  Tue, 12 Sep 2023 22:01:38 -0300
+
+poetry (1.6.1+dfsg-1) unstable; urgency=medium
+
+  * New upstream version.
+  * d/rules: override dh_auto_test to avoid remove egg-info folder. Some
+    poetry tests use egg-info folders created for tests purpose as fixtures
+    (Closes: #1050688).
+  * d/rules: Ignore
+    test_solver_ignores_explicit_repo_for_transient_dependencies and
+    test_chooser_md5_remote_fallback_to_sha256_inline_calculation tests
+    because they use ignored tar.gz files.
+    - d/tests/pytest: Ignore these tests in autopkgtest.
+  * d/patches: Update
+    0001-Accept-Python-version-string-with-a-at-the-end.patch patch according
+    to new upstream release code.
+
+ -- Emmanuel Arias <eamanu@debian.org>  Thu, 07 Sep 2023 11:49:59 -0300
+
+poetry (1.5.1+dfsg-4) unstable; urgency=medium
+
+  * d/control: Pin python3-poetry-core B-Depends to >= 1.6.1 (Closes:
+    #1050362)
+
+ -- Emmanuel Arias <eamanu@debian.org>  Wed, 23 Aug 2023 21:35:55 -0300
+
+poetry (1.5.1+dfsg-3) unstable; urgency=medium
+
+  * d/tests/control: Add gcc package as Depends. It is needed for tests
+    and is not installed in the autopkgtests machine.
+
+ -- Emmanuel Arias <eamanu@debian.org>  Wed, 09 Aug 2023 09:26:38 -0300
+
+poetry (1.5.1+dfsg-2) unstable; urgency=medium
+
+  * d/tests/pytest: Ignore tests for autopkgtest:
+    - test_executor_should_write_pep610_url_references_for_non_wheel_urls
+    - test_executor_should_write_pep610_url_references_for_non_wheel_files
+    - test_prepare_sdist
+    - test_shell.
+
+ -- Emmanuel Arias <eamanu@debian.org>  Tue, 08 Aug 2023 09:37:10 -0300
+
+poetry (1.5.1+dfsg-1) unstable; urgency=medium
+
+  * New upstream version.
+  * d/patches/0002-Loosen-platformdirs-dependency.patch: Remove patch, is not
+    longer needed. The platformdirs was bumped to 3.
+  * d/patches/0001-Accept-Python-version-string-with-a-at-the-end.patch: Update
+    patch according to new upstream version.
+  * d/patches/skip-test-with-prefer-active-python-key.patch: Add new patch to
+    skip tests that use the experimental key prefer-active-python in
+    pyproject.toml.
+  * d/control: Add python3-trove-classifiers as a Build Dependency.
+    - Also add python3-trove-classifiers as Dependency in d/tests/control file.
+  * d/rules: Ignore the next test the need more work before active them:
+    - test_executor_should_write_pep610_url_references_for_git_with_subdirectories
+    - test_executor_should_write_pep610_url_references_for_non_wheel_urls
+    - test_executor_should_write_pep610_url_references_for_non_wheel_files
+    - test_prepare_sdist
+    - test_shell. This tests fails because an issue in shellingham Debian package
+      (no bug reported yet). When it is fixed this test will be activated
+      again.
+  * d/rules: Remove execute_after_dh_install target.
+    - The foo folder and .gitignore file is not installed anymore by the upstream.
+    - The Python fles: factory.py, mixology/partial_solution.py,
+      mixology/term.py, mixology/version_solver.py, puzzle/provider.py,
+      repositories/legacy_repository.py, repositories/pool.py,
+      repositories/pypi_repository.py and repositories/repository.py are not
+      created with execution permission anymore.
+  * d/control: Add python3-tomlkit as Build-Depends.
+    - d/tests/control: Add python3-tomlkit as Dependency.
+  * d/control: Add python3-all-dev as Build-Depends. Also add it to
+    d/tests/control file.
+  * d/control: Update my contact information in Uploaders field.
+    - d/copyright: Update my contact information in debian/* files copyright.
+
+ -- Emmanuel Arias <eamanu@debian.org>  Mon, 07 Aug 2023 12:26:08 -0300
+
+poetry (1.3.2+dfsg-5) unstable; urgency=medium
+
+  * Upload to unstable.
+  * Exclude a test that requires network access.
+
+ -- Stefano Rivera <stefanor@debian.org>  Wed, 14 Jun 2023 16:10:40 -0400
+
+poetry (1.3.2+dfsg-4) experimental; urgency=medium
+
+  * Team upload.
+  * Patch: Loosen platformdirs dependency.
+
+ -- Stefano Rivera <stefanor@debian.org>  Wed, 01 Mar 2023 21:48:29 -0400
+
+poetry (1.3.2+dfsg-3) unstable; urgency=medium
+
+  * d/control: Remove python3-pylev as a B-Depends. This is a B-Depends of
+    python3-cleo.
+    - d/tests/control: Remove python3-pylev as dependency of the autopkgtest.
+
+ -- Emmanuel Arias <eamanu@yaerobi.com>  Tue, 17 Jan 2023 18:59:26 -0300
+
+poetry (1.3.2+dfsg-2) unstable; urgency=medium
+
+  * d/control: Add python3-pylev as a Build Depends (Closes: #1028913).
+
+ -- Emmanuel Arias <eamanu@yaerobi.com>  Sat, 14 Jan 2023 20:42:56 -0300
+
+poetry (1.3.2+dfsg-1) unstable; urgency=medium
+
+  * New upstream version.
+  * d/tests/control: Add python3-cachy to autopkgtest dependency.
+    - Ignore tests/utils/test_helpers.py test file as in d/rules.
+
+ -- Emmanuel Arias <eamanu@yaerobi.com>  Thu, 12 Jan 2023 07:20:09 -0300
+
+poetry (1.3.1+dfsg-2) unstable; urgency=medium
+
+  * d/rules: Ignore some tests that use internet (Closes: #1028240).
+    - Add the ignored tests to autopkgtest.
+  * d/tests/control: Add python3-pylev as dependency.
+
+ -- Emmanuel Arias <eamanu@yaerobi.com>  Mon, 09 Jan 2023 22:38:41 -0300
+
+poetry (1.3.1+dfsg-1) unstable; urgency=medium
+
+  * New upstream version.
+  * d/rules: Ignore more tests that need more work after Debian freeze.
+  * d/control: Bump Standards-Version to 4.6.2 (from 4.6.1). No changes
+    needed.
+
+ -- Emmanuel Arias <eamanu@yaerobi.com>  Sat, 07 Jan 2023 23:41:25 -0300
+
+poetry (1.2.2+dfsg-1) unstable; urgency=medium
+
+  * New upstream version (Closes: #1023612, #1025025).
+  * d/control: Add new packages as Build Depends: python3-deepdiff,
+    python3-dulwich, python3-pip, python3-pytest-xdist, python3-venv,
+    python3.11-venv.
+  * d/rules: Skip tests, they need more work before active them:
+    test_package_partial_yank, test_run_installs_with_same_version_url_files,
+    test_env_info_displays_complete_info, test_skip_existing_output,
+    test_installer_should_use_the_locked_version_of_git_dependencies_with_extras,
+    test_installer_should_use_the_locked_version_of_git_dependencies_without_reference,
+    test_installer_uses_prereleases_if_they_are_compatible,
+    test_requirement_git_subdirectory and test_config.py.
+  * d/patches: Remove all patches they are not longer needed.
+  * d/patches/0001-Accept-Python-version-string-with-a-at-the-end.patch: Add patch
+    to make poetry accept Python version string with a + at the end.
+  * d/tests/: Update autopkgtests to work with new upstream release.
+    - d/tests/control: Add python3-pytest-xdist, python3-venv, python3.11-venv
+    as dependencies.
+    - d/tests/pytest: Update the ignore tests. They are the same as in
+    d/rules.
+
+ -- Emmanuel Arias <eamanu@yaerobi.com>  Thu, 17 Nov 2022 10:32:39 -0300
+
+poetry (1.1.14+dfsg-1) unstable; urgency=medium
+
+  * New upstream version.
+  * d/patches/PR3544.patch: Remove patch, already applied by the upstream.
+  * d/control: Bump Standards-Version to 4.6.1 (from 4.6.0.1). No changes
+    needed.
+  * d/copyright: Update Copyright year for debian/* files.
+  * d/rules: Remove .gitignore file from poetry/_vendor.
+  * d/rules: Remove execution permissions to upstream files in poetry folder:
+    factory.py, mixology/partial_solution.py, mixology/term.py,
+    mixology/version_solver.py, puzzle/provider.py,
+    repositories/legacy_repository.py, repositories/pool.py,
+    repositories/pypi_repository.py, repositories/repository.py.
+  * d/control: Remove python3-setuptools from build Depends.
+  * d/control: Add <!nochek> profile in Build Depends to the packages that
+    are used in tests.
+  * d/tests: Add autopkgtests.
+  * d/control: Remove trivial autopkgtest-pkg-python.
+
+ -- Emmanuel Arias <eamanu@yaerobi.com>  Sun, 21 Aug 2022 14:40:13 -0400
+
+poetry (1.1.12+dfsg-1) unstable; urgency=medium
+
+  * New upstream release.
+  * debian/watch: change regex to remove alpha, beta and release candidate
+    from matched versions.
+  * d/control: Bump Standards-Version to 4.6.0.1. No changes needed.
+  * d/patches: Remove patch that add the setup.py. Now poetry is builded using
+    pep517.
+    - Update the name of the other patches.
+  * d/control: Build with pybuild's pyproject plugin. Add
+    pybuild-plugin-pyproject as Build Depends.
+
+ -- Emmanuel Arias <eamanu@yaerobi.com>  Mon, 27 Dec 2021 17:51:58 -0300
+
+poetry (1.1.11+dfsg-3) unstable; urgency=medium
+
+  * debian/patches/PR3544.patch
+    - add upstream PR 3544, fixes a failure running test on python 3.10
+
+ -- Sandro Tosi <morph@debian.org>  Tue, 21 Dec 2021 01:24:46 -0500
+
+poetry (1.1.11+dfsg-2) unstable; urgency=medium
+
+  * source-only upload
+
+ -- Sandro Tosi <morph@debian.org>  Mon, 20 Dec 2021 23:54:12 -0500
+
+poetry (1.1.11+dfsg-1) unstable; urgency=medium
+
+  * Initial release (Closes: #947261)
+
+ -- Emmanuel Arias <eamanu@yaerobi.com>  Tue, 31 Mar 2020 21:29:12 -0300
