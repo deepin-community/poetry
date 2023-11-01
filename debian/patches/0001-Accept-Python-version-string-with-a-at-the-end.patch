@@ -1,0 +1,42 @@
+From: Emmanuel Arias <eamanu@yaerobi.com>
+Date: Sat, 3 Dec 2022 19:19:59 -0300
+Subject: Accept Python version string with a + at the end
+
+Currently PEP440 version parser from poetry-core didn't accept versions
+strings that finish with a + symbol. This patch modify the regex to
+accept a + symbol in the Python version.
+
+Patch is not sending to upstream until they decide how manage this
+situation.
+
+Bug: https://github.com/python-poetry/poetry/issues/6925
+---
+ src/poetry/utils/env.py | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+Index: poetry-1.0.5/src/poetry/utils/env/script_strings.py
+===================================================================
+--- poetry-1.0.5.orig/src/poetry/utils/env/script_strings.py	2023-09-07 11:49:51.274126460 -0300
++++ poetry-1.0.5/src/poetry/utils/env/script_strings.py	2023-09-07 21:49:40.043934382 -0300
+@@ -82,7 +82,7 @@
+     "platform_release": platform.release(),
+     "platform_system": platform.system(),
+     "platform_version": platform.version(),
+-    "python_full_version": platform.python_version(),
++    "python_full_version": platform.python_version().rstrip("+"),
+     "platform_python_implementation": platform.python_implementation(),
+     "python_version": ".".join(platform.python_version_tuple()[:2]),
+     "sys_platform": sys.platform,
+Index: poetry-1.0.5/src/poetry/utils/env/system_env.py
+===================================================================
+--- poetry-1.0.5.orig/src/poetry/utils/env/system_env.py	2023-09-07 11:49:51.274126460 -0300
++++ poetry-1.0.5/src/poetry/utils/env/system_env.py	2023-09-07 21:50:23.120514556 -0300
+@@ -71,7 +71,7 @@
+             "platform_release": platform.release(),
+             "platform_system": platform.system(),
+             "platform_version": platform.version(),
+-            "python_full_version": platform.python_version(),
++            "python_full_version": platform.python_version().rstrip("+"),
+             "platform_python_implementation": platform.python_implementation(),
+             "python_version": ".".join(platform.python_version().split(".")[:2]),
+             "sys_platform": sys.platform,
