@@ -1,4 +1,4 @@
-poetry (1.6.1+dfsg-2.1) unstable; urgency=medium
+poetry (1.6.1+dfsg-2deepin1) unstable; urgency=medium
 
   * skip auto_test.
 
