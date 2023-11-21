@@ -1,3 +1,9 @@
+poetry (1.6.1+dfsg-2.1) unstable; urgency=medium
+
+  * skip auto_test.
+
+ -- LiChengGang <lichenggang@uniontech.com>  Tue, 21 Nov 2023 23:19:45 +0800
+
 poetry (1.6.1+dfsg-2) unstable; urgency=medium
 
   * d/rules: Skip the next tests that use internet (Closes: #1050688):
