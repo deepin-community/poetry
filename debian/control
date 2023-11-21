@@ -36,6 +36,7 @@ Build-Depends: debhelper-compat (= 13),
                python3-trove-classifiers,
                python3-venv,
                python3-virtualenv (>= 20.4.0),
+               python3-pyproject-hooks,
                python3.11-venv,
 Standards-Version: 4.6.2
 Homepage: https://python-poetry.org/
