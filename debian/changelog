@@ -1,3 +1,9 @@
+poetry (1.6.1+dfsg-2deepin2) unstable; urgency=medium
+
+  * feat-platforemdirs-version
+
+ -- LiChengGang <lichenggang@uniontech.com>  Wed, 22 Nov 2023 00:42:34 +0800
+
 poetry (1.6.1+dfsg-2deepin1) unstable; urgency=medium
 
   * skip auto_test.
