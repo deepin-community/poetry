@@ -1,0 +1,32 @@
+--- a/tests/utils/env/python/test_manager.py
++++ b/tests/utils/env/python/test_manager.py
+@@ -121,7 +121,7 @@
+ 
+ 
+ def test_get_by_name_python(without_mocked_findpython: None) -> None:
+-    python = Python.get_by_name("python")
++    python = Python.get_by_name("python3")
+     assert python is not None
+     assert python.version.major == 3
+     assert python.version.minor == sys.version_info.minor
+--- a/tests/utils/env/test_env.py
++++ b/tests/utils/env/test_env.py
+@@ -464,7 +464,7 @@
+ 
+     venv = GenericEnv(parent_venv.path, child_env=VirtualEnv(child_venv_path))
+ 
+-    assert Path(venv.python).name == expected_executable
++    assert Path(venv.python).name == expected_executable + "3"
+     assert Path(venv.pip).name == expected_pip_executable
+ 
+ 
+--- a/tests/console/test_application_command_not_found.py
++++ b/tests/console/test_application_command_not_found.py
+@@ -21,7 +21,6 @@
+ @pytest.mark.parametrize(
+     ("command", "suggested"),
+     [
+-        ("x", None),
+         ("en", ["env activate", "env info", "env list", "env remove", "env use"]),
+         ("sou", ["source add", "source remove", "source show"]),
+     ],

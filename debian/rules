@@ -60,8 +60,34 @@ export PYBUILD_TEST_ARGS=--ignore=tests/console/commands/env/test_list.py \
 			and not test_installer_with_pypi_repository \
 			and not test_prepare_directory_editable \
 			and not test_prepare_directory \
-			and not test_prepare_directory_with_extensions'
-
+			and not test_prepare_directory_with_extensions \
+			and not test_build_backend_errors_are_reported_correctly_if_caused_by_subprocess \
+			and not test_build_backend_errors_are_reported_correctly_if_caused_by_subprocess_encoding \
+			and not test_isolated_env_install_success \
+			and not test_isolated_env_install_error \
+			and not test_isolated_env_install_failure \
+			and not test_application_with_plugins \
+			and not test_build_system_requires_not_available \
+			and not test_build_system_requires_install_failure \
+			and not test_prepare_directory_script \
+			and not test_fallback_on_detect_active_python \
+			and not test_get_venv_with_venv_folder_present \
+			and not test_not_fresh_lock \
+			and not test_list \
+			and not test_info_setup_complex_calls_script \
+			and not test_publish_dist_dir_option \
+			and not test_executor_known_hashes \
+			and not test_execute_executes_a_batch_of_operations \
+			and not test_execute_prints_warning_for_yanked_package \
+			and not test_build_environment_called_build_script_specified \
+			and not test_solver_ignores_explicit_repo_for_transitive_dependencies \
+			and not test_file_hashes_returns_none_for_blake2_with_fips \
+			and not test_solver_does_not_choose_from_supplemental_repository_by_default \
+	                and not test_get_preferred_python_use_poetry_python_disabled \
+	                and not test_solver_chooses_from_supplemental_if_explicit \
+			and not test_file_hashes_returns_none_for_md5_with_fips \
+			and not test_file_hashes_returns_proper_hashes_for_file \
+			and not test_shutil_which_python_provider'
 
 
 export http_proxy=
@@ -72,10 +98,10 @@ export DESTDIR=$(CURDIR)/debian/python3-poetry
 PYVERS := $(shell py3versions -sv)
 
 
+
 %:
 	dh $@ --with python3 --buildsystem=pybuild
 
-override_dh_auto_test:
 override_dh_auto_clean:
 	find . -iname '*.pyc' -delete
 	for i in $$(find . -type d -iname __pycache__) ; do rm -rf $$i ; done

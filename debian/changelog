@@ -1,14 +1,152 @@
-poetry (1.6.1+dfsg-2deepin2) unstable; urgency=medium
+poetry (2.1.1+dfsg-3) unstable; urgency=medium
 
-  * feat-platforemdirs-version
+  * d/patches/increase-sleep-time-in-threading-test.patch: Add patch to
+    increase the sleep time in a test.
 
- -- LiChengGang <lichenggang@uniontech.com>  Wed, 22 Nov 2023 00:42:34 +0800
+ -- Emmanuel Arias <eamanu@debian.org>  Wed, 19 Mar 2025 16:49:59 -0300
 
-poetry (1.6.1+dfsg-2deepin1) unstable; urgency=medium
+poetry (2.1.1+dfsg-2) unstable; urgency=medium
 
-  * skip auto_test.
+  * Team upload.
+  * d/tests/pytest: Ignore test_find_downloadable_versions except on
+    amd64/arm64/i386, since pbs_installer doesn't advertise any Python
+    builds on other architectures.
 
- -- LiChengGang <lichenggang@uniontech.com>  Tue, 21 Nov 2023 23:19:45 +0800
+ -- Colin Watson <cjwatson@debian.org>  Tue, 18 Mar 2025 11:51:16 +0000
+
+poetry (2.1.1+dfsg-1) unstable; urgency=medium
+
+  * New upstream version.
+  * d/control: Add python3-findpython and python3-pbs-installer as Build
+    Dependencies.
+    - Also pin python3-cleo (>= 2.2.1) and python3-poetry-core (>= 2.1.1).
+  * d/patches/0001-Apply-workaround-to-fix-httpretty-with-urllib-2.3.patch:
+    Update patch according to new upstream release.
+  * d/patches/fix-env-manager.patch: Add patch to fix python command to
+    python3.
+  * d/rules: Ignore test_shutil_which_python_provider test, it fails while
+    looks for python version.
+    - d/tests/pytest: Also ignore it in autopkgtest.
+  * d/patches/fix-tests.patch: Remove tests that fails for cleo
+    find_similar_names gives different values.
+    - Also fix test that use incorrect Python version.
+
+ -- Emmanuel Arias <eamanu@debian.org>  Wed, 19 Feb 2025 20:04:49 -0300
+
+poetry (2.0.1+dfsg-1) unstable; urgency=medium
+
+  * New upstream version (Closes: #1093350).
+  * d/patches: Remove fix-encoding-warning-with-pep597-enabled.patch and
+    skip-test-with-prefer-active-python-key.patch patches, they are not longer
+    needed.
+  * d/control: Update pin version for python3-poetry-core and python3-cleo.
+  * d/patches/0001-Apply-workaround-to-fix-httpretty-with-urllib-2.3.patch: Add
+    workaround to fix an issue with httpretty and urlib >= 2.3.
+  * d/rules: Ignore tests because they use internet or required old Python
+    version: test_build_environment_called_build_script_specified,
+    test_solver_ignores_explicit_repo_for_transitive_dependencies,
+    test_file_hashes_returns_none_for_blake2_with_fips,
+    test_solver_does_not_choose_from_supplemental_repository_by_default,
+    test_get_preferred_python_use_poetry_python_disabled,
+    test_solver_chooses_from_supplemental_if_explicit,
+    test_file_hashes_returns_none_for_md5_with_fips and
+    test_file_hashes_returns_proper_hashes_for_file.
+    - Also ignore them and test_env_system_packages_are_relative_to_lib in
+      d/tests/pytest.
+
+ -- Emmanuel Arias <eamanu@debian.org>  Tue, 21 Jan 2025 13:34:34 -0300
+
+poetry (1.8.3+dfsg-4) unstable; urgency=medium
+
+  * d/patches/fix-encoding-warning-with-pep597-enabled.patch: Add patch to fix
+    enconding warning with PEP 597 enabled.
+
+ -- Emmanuel Arias <eamanu@debian.org>  Fri, 20 Sep 2024 20:48:47 -0300
+
+poetry (1.8.3+dfsg-3) unstable; urgency=medium
+
+  * d/control: Remove python3.11-venv from Build Dependency.
+    Also remove it from autopkgtest.
+  * d/control: Bump Standards-Version to 4.7.0 (from 4.6.2; no further
+    changes needed).
+  * d/rules: ignore test_execute_executes_a_batch_of_operations,
+    test_execute_prints_warning_for_yanked_package
+    and test_build_environment_called_build_script_specified tests because
+    they use pip, need more investigation (Closes: #1074725).
+    - Remove from d/tests/pytest file.
+
+ -- Emmanuel Arias <eamanu@debian.org>  Sat, 13 Jul 2024 11:27:40 -0300
+
+poetry (1.8.3+dfsg-2) unstable; urgency=medium
+
+  * Team Upload
+  * Remove dependency on obsolete python3-lockfile (see #1073280)
+    which itself build-depends on python3-nose.
+
+ -- Alexandre Detiste <tchet@debian.org>  Sun, 16 Jun 2024 22:13:53 +0200
+
+poetry (1.8.3+dfsg-1) unstable; urgency=medium
+
+  * New upstream version.
+  * d/control: Add python3-packaging as Build Depends (Closes: #1071071).
+  * d/patches/0001-Accept-Python-version-string-with-a-at-the-end.patch:
+    Remove patch, it is already fixed in upstream.
+
+ -- Emmanuel Arias <eamanu@debian.org>  Fri, 17 May 2024 22:02:27 -0300
+
+poetry (1.8.2+dfsg-1) unstable; urgency=medium
+
+  * d/control: Pin python3-poetry-core to 1.9.0.
+  * New upstream version.
+
+ -- Emmanuel Arias <eamanu@debian.org>  Sun, 03 Mar 2024 21:27:53 -0300
+
+poetry (1.8.0.dev0~git20240220.cff4d7d5+dfsg-1) experimental; urgency=medium
+
+  * New upstream version.
+  * d/patch: Remove platformdirs-4.patch patch, it was already applied by
+    upstream.
+  * d/rules: Ignore tests: test_fallback_on_detect_active_python,
+    test_get_venv_with_venv_folder_present, test_not_fresh_lock,
+    test_list, test_info_setup_complex_calls_script,
+    test_executor_known_hashes and test_publish_dist_dir_option. They need
+    more work.
+    - Also ignore them in d/tests/pytest.
+  * d/tests/simple-commands-run: Add new autopkgtest test to run `poetry
+    add` and `poetry update`. This to detect some errors in those simple
+    commands (Closes: #1058670).
+  * d/tests/control: Add a superficial tests to run `poetry -v` (Closes:
+    #1029480).
+  * d/control: Add python3-poetry-plugin-export as Build Depends (Closes:
+    #1059356).
+    - d/rules: Activate test_export_prints_warning and
+    test_disable_export_warning tests that need poetry-plugin-export.
+    - Also activate those tests in d/tests/pytest.
+
+ -- Emmanuel Arias <eamanu@debian.org>  Thu, 22 Feb 2024 18:12:00 -0300
+
+poetry (1.7.1+dfsg-1) unstable; urgency=medium
+
+  [Stefano Rivera]
+  * Patch: Loosen platformdirs dependency.
+  * Recommend python3-trove-classifiers for check (Closes: #1030310).
+
+  [Emmanuel Arias]
+  * New upstream release (Closes: #1056144).
+  * d/rules: Deactvate tests that need more works:
+    test_prepare_directory_with_extensions, test_export_prints_warning,
+    test_disable_export_warning,
+    test_build_backend_errors_are_reported_correctly_if_caused_by_subprocess,
+    test_build_backend_errors_are_reported_correctly_if_caused_by_subprocess_encoding,
+    test_isolated_env_install_success, test_isolated_env_install_error,
+    test_isolated_env_install_failure, test_application_with_plugins,
+    test_build_system_requires_not_available,
+    test_build_system_requires_install_failure and
+    test_prepare_directory_script.
+    - Reply it in d/test/pytest file.
+  * d/control: Pin python3-poetry-core to 1.8.1.
+
+ -- Emmanuel Arias <eamanu@debian.org>  Fri, 10 Nov 2023 20:16:27 -0300
 
 poetry (1.6.1+dfsg-2) unstable; urgency=medium
 

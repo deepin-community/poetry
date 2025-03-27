@@ -1,0 +1,19 @@
+Description: Increase sleep time in a treading test
+ In Debian CI fails a test that use sleep(0.05) and in some machine apparently
+ they don't have enough time to finished. Thanks cjwatson to noted it.
+Author: Emmanuel Arias
+Forwarded: not-needed
+Last-Update: 2025-03-19
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/tests/utils/test_threading.py
++++ b/tests/utils/test_threading.py
+@@ -42,7 +42,7 @@
+ 
+     def _compute_value(self) -> int:
+         # we block the thread here to ensure contention
+-        time.sleep(0.05)
++        time.sleep(5)
+         return self.compute_value(self._name, time.time())
+ 
+     @functools.cached_property

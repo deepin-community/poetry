@@ -10,7 +10,7 @@
 Poetry helps you declare, manage and install dependencies of Python projects,
 ensuring you have the right stack everywhere.
 
-![Poetry Install](https://raw.githubusercontent.com/python-poetry/poetry/master/assets/install.gif)
+![Poetry Install](https://raw.githubusercontent.com/python-poetry/poetry/main/assets/install.gif)
 
 Poetry replaces `setup.py`, `requirements.txt`, `setup.cfg`, `MANIFEST.in` and `Pipfile` with a simple `pyproject.toml`
 based project format.
@@ -46,7 +46,7 @@ requests = { version = "^2.28", extras = ["security"] }
 # Version-specific dependencies with prereleases allowed
 tomli = { version = "^2.0.1", python = "<3.11", allow-prereleases = true }
 # Git dependencies
-cleo = { git = "https://github.com/python-poetry/cleo.git", branch = "master" }
+cleo = { git = "https://github.com/python-poetry/cleo.git", branch = "main" }
 # Optional dependencies (installed by extras)
 pendulum = { version = "^2.1.2", optional = true }
 
@@ -113,3 +113,9 @@ external formats like virtual environments
 * [install.python-poetry.org](https://github.com/python-poetry/install.python-poetry.org): The official Poetry
 installation script
 * [website](https://github.com/python-poetry/website): The official Poetry website and blog
+
+## Supporters
+
+Thanks to [JetBrains](https://www.jetbrains.com) for supporting us with licenses for their tools.
+
+[<img src="https://resources.jetbrains.com/storage/products/company/brand/logos/jetbrains.svg" width="150" alt="JetBrains logo." />](https://www.jetbrains.com)

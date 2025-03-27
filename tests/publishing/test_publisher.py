@@ -36,14 +36,14 @@ def test_publish_publishes_to_pypi_by_default(
 
     publisher.publish(None, None, None)
 
-    assert [("foo", "bar")] == uploader_auth.call_args
-    assert [
+    assert uploader_auth.call_args == [("foo", "bar")]
+    assert uploader_upload.call_args == [
         ("https://upload.pypi.org/legacy/",),
         {"cert": True, "client_cert": None, "dry_run": False, "skip_existing": False},
-    ] == uploader_upload.call_args
+    ]
 
 
-@pytest.mark.parametrize("fixture_name", ["sample_project", "with_default_source"])
+@pytest.mark.parametrize("fixture_name", ["sample_project", "with_source"])
 def test_publish_can_publish_to_given_repository(
     fixture_dir: FixtureDirGetter,
     mocker: MockerFixture,
@@ -68,11 +68,11 @@ def test_publish_can_publish_to_given_repository(
 
     publisher.publish("foo", None, None)
 
-    assert [("foo", "bar")] == uploader_auth.call_args
-    assert [
+    assert uploader_auth.call_args == [("foo", "bar")]
+    assert uploader_upload.call_args == [
         ("http://foo.bar",),
         {"cert": True, "client_cert": None, "dry_run": False, "skip_existing": False},
-    ] == uploader_upload.call_args
+    ]
     project_name = canonicalize_name(fixture_name)
     assert f"Publishing {project_name} (1.2.3) to foo" in io.fetch_output()
 
@@ -91,23 +91,38 @@ def test_publish_raises_error_for_undefined_repository(
         publisher.publish("my-repo", None, None)
 
 
-def test_publish_uses_token_if_it_exists(
-    fixture_dir: FixtureDirGetter, mocker: MockerFixture, config: Config
+def assert_publish_uses_token_if_it_exists(
+    fixture_dir: FixtureDirGetter, mocker: MockerFixture, config: Config | None = None
 ) -> None:
     uploader_auth = mocker.patch("poetry.publishing.uploader.Uploader.auth")
     uploader_upload = mocker.patch("poetry.publishing.uploader.Uploader.upload")
     poetry = Factory().create_poetry(fixture_dir("sample_project"))
-    poetry._config = config
-    poetry.config.merge({"pypi-token": {"pypi": "my-token"}})
-    publisher = Publisher(poetry, NullIO())
 
+    if config:
+        poetry._config = config
+
+    publisher = Publisher(poetry, NullIO())
     publisher.publish(None, None, None)
 
-    assert [("__token__", "my-token")] == uploader_auth.call_args
-    assert [
+    assert uploader_auth.call_args == [("__token__", "my-token")]
+    assert uploader_upload.call_args == [
         ("https://upload.pypi.org/legacy/",),
         {"cert": True, "client_cert": None, "dry_run": False, "skip_existing": False},
-    ] == uploader_upload.call_args
+    ]
+
+
+def test_publish_uses_token_if_it_exists(
+    fixture_dir: FixtureDirGetter, mocker: MockerFixture, config: Config
+) -> None:
+    config.merge({"pypi-token": {"pypi": "my-token"}})
+    assert_publish_uses_token_if_it_exists(fixture_dir, mocker, config)
+
+
+def test_publish_uses_env_token_if_it_exists(
+    fixture_dir: FixtureDirGetter, mocker: MockerFixture, environ: None
+) -> None:
+    os.environ["POETRY_PYPI_TOKEN_PYPI"] = "my-token"
+    assert_publish_uses_token_if_it_exists(fixture_dir, mocker)
 
 
 def test_publish_uses_cert(
@@ -129,8 +144,8 @@ def test_publish_uses_cert(
 
     publisher.publish("foo", None, None)
 
-    assert [("foo", "bar")] == uploader_auth.call_args
-    assert [
+    assert uploader_auth.call_args == [("foo", "bar")]
+    assert uploader_upload.call_args == [
         ("https://foo.bar",),
         {
             "cert": Path(cert),
@@ -138,7 +153,7 @@ def test_publish_uses_cert(
             "dry_run": False,
             "skip_existing": False,
         },
-    ] == uploader_upload.call_args
+    ]
 
 
 def test_publish_uses_client_cert(
@@ -158,7 +173,7 @@ def test_publish_uses_client_cert(
 
     publisher.publish("foo", None, None)
 
-    assert [
+    assert uploader_upload.call_args == [
         ("https://foo.bar",),
         {
             "cert": True,
@@ -166,7 +181,7 @@ def test_publish_uses_client_cert(
             "dry_run": False,
             "skip_existing": False,
         },
-    ] == uploader_upload.call_args
+    ]
 
 
 def test_publish_read_from_environment_variable(
@@ -185,8 +200,8 @@ def test_publish_read_from_environment_variable(
 
     publisher.publish("foo", None, None)
 
-    assert [("bar", "baz")] == uploader_auth.call_args
-    assert [
+    assert uploader_auth.call_args == [("bar", "baz")]
+    assert uploader_upload.call_args == [
         ("https://foo.bar",),
         {"cert": True, "client_cert": None, "dry_run": False, "skip_existing": False},
-    ] == uploader_upload.call_args
+    ]

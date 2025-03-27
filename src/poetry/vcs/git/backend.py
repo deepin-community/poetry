@@ -8,6 +8,8 @@ from pathlib import Path
 from subprocess import CalledProcessError
 from typing import TYPE_CHECKING
 from urllib.parse import urljoin
+from urllib.parse import urlparse
+from urllib.parse import urlunparse
 
 from dulwich import porcelain
 from dulwich.client import HTTPUnauthorized
@@ -15,10 +17,11 @@ from dulwich.client import get_transport_and_path
 from dulwich.config import ConfigFile
 from dulwich.config import parse_submodules
 from dulwich.errors import NotGitRepository
+from dulwich.index import IndexEntry
 from dulwich.refs import ANNOTATED_TAG_SUFFIX
 from dulwich.repo import Repo
 
-from poetry.console.exceptions import PoetryConsoleError
+from poetry.console.exceptions import PoetryRuntimeError
 from poetry.utils.authenticator import get_default_authenticator
 from poetry.utils.helpers import remove_directory
 
@@ -29,6 +32,33 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+# A relative URL by definition starts with ../ or ./
+RELATIVE_SUBMODULE_REGEX = re.compile(r"^\.{1,2}/")
+
+# Common error messages
+ERROR_MESSAGE_NOTE = (
+    "<b>Note:</> This error arises from interacting with "
+    "the specified vcs source and is likely not a "
+    "Poetry issue."
+)
+ERROR_MESSAGE_PROBLEMS_SECTION_START = (
+    "This issue could be caused by any of the following;\n\n"
+    "- there are network issues in this environment"
+)
+ERROR_MESSAGE_BAD_REVISION = (
+    "- the revision ({revision}) you have specified\n"
+    "    - was misspelled\n"
+    "    - is invalid (must be a sha or symref)\n"
+    "    - is not present on remote"
+)
+ERROR_MESSAGE_BAD_REMOTE = (
+    "- the remote ({remote}) you have specified\n"
+    "    - was misspelled\n"
+    "    - does not exist\n"
+    "    - requires credentials that were either not configured or is incorrect\n"
+    "    - is in accessible due to network issues"
+)
 
 
 def is_revision_sha(revision: str | None) -> bool:
@@ -48,14 +78,14 @@ class GitRefSpec:
     tag: str | None = None
     ref: bytes = dataclasses.field(default_factory=lambda: b"HEAD")
 
-    def resolve(self, remote_refs: FetchPackResult) -> None:
+    def resolve(self, remote_refs: FetchPackResult, repo: Repo) -> None:
         """
         Resolve the ref using the provided remote refs.
         """
-        self._normalise(remote_refs=remote_refs)
+        self._normalise(remote_refs=remote_refs, repo=repo)
         self._set_head(remote_refs=remote_refs)
 
-    def _normalise(self, remote_refs: FetchPackResult) -> None:
+    def _normalise(self, remote_refs: FetchPackResult, repo: Repo) -> None:
         """
         Internal helper method to determine if given revision is
             1. a branch or tag; if so, set corresponding properties.
@@ -92,7 +122,12 @@ class GitRefSpec:
             for sha in remote_refs.refs.values():
                 if sha.startswith(short_sha):
                     self.revision = sha.decode("utf-8")
-                    break
+                    return
+
+            # no heads with such SHA, let's check all objects
+            for sha in repo.object_store.iter_prefix(short_sha):
+                self.revision = sha.decode("utf-8")
+                return
 
     def _set_head(self, remote_refs: FetchPackResult) -> None:
         """
@@ -128,7 +163,9 @@ class GitRefSpec:
 
     @property
     def is_ref(self) -> bool:
-        return self.branch is not None and self.branch.startswith("refs/")
+        return self.branch is not None and (
+            self.branch.startswith("refs/") or self.branch == "HEAD"
+        )
 
     @property
     def is_sha_short(self) -> bool:
@@ -168,7 +205,7 @@ class Git:
     @staticmethod
     def get_revision(repo: Repo) -> str:
         with repo:
-            return repo.head().decode("utf-8")
+            return repo.get_peeled(b"HEAD").decode("utf-8")
 
     @classmethod
     def info(cls, repo: Repo | Path) -> GitRepoLocalInfo:
@@ -176,7 +213,7 @@ class Git:
 
     @staticmethod
     def get_name_from_source_url(url: str) -> str:
-        return re.sub(r"(.git)?$", "", url.rsplit("/", 1)[-1])
+        return re.sub(r"(.git)?$", "", url.rstrip("/").rsplit("/", 1)[-1])
 
     @classmethod
     def _fetch_remote_refs(cls, url: str, local: Repo) -> FetchPackResult:
@@ -223,10 +260,15 @@ class Git:
 
         try:
             SystemGit.clone(url, target)
-        except CalledProcessError:
-            raise PoetryConsoleError(
-                f"Failed to clone {url}, check your git configuration and permissions"
-                " for this repository."
+        except CalledProcessError as e:
+            raise PoetryRuntimeError.create(
+                reason=f"<error>Failed to clone <info>{url}</>, check your git configuration and permissions for this repository.</>",
+                exception=e,
+                info=[
+                    ERROR_MESSAGE_NOTE,
+                    ERROR_MESSAGE_PROBLEMS_SECTION_START,
+                    ERROR_MESSAGE_BAD_REMOTE.format(remote=url),
+                ],
             )
 
         if revision:
@@ -235,8 +277,16 @@ class Git:
 
         try:
             SystemGit.checkout(revision, target)
-        except CalledProcessError:
-            raise PoetryConsoleError(f"Failed to checkout {url} at '{revision}'")
+        except CalledProcessError as e:
+            raise PoetryRuntimeError.create(
+                reason=f"<error>Failed to checkout {url} at '{revision}'.</>",
+                exception=e,
+                info=[
+                    ERROR_MESSAGE_NOTE,
+                    ERROR_MESSAGE_PROBLEMS_SECTION_START,
+                    ERROR_MESSAGE_BAD_REVISION.format(revision=revision),
+                ],
+            )
 
         repo = Repo(str(target))
         return repo
@@ -261,15 +311,30 @@ class Git:
         )
 
         try:
-            refspec.resolve(remote_refs=remote_refs)
+            refspec.resolve(remote_refs=remote_refs, repo=local)
         except KeyError:  # branch / ref does not exist
-            raise PoetryConsoleError(
-                f"Failed to clone {url} at '{refspec.key}', verify ref exists on"
-                " remote."
+            raise PoetryRuntimeError.create(
+                reason=f"<error>Failed to clone {url} at '{refspec.key}', verify ref exists on remote.</>",
+                info=[
+                    ERROR_MESSAGE_NOTE,
+                    ERROR_MESSAGE_PROBLEMS_SECTION_START,
+                    ERROR_MESSAGE_BAD_REVISION.format(revision=refspec.key),
+                ],
             )
 
-        # ensure local HEAD matches remote
-        local.refs[b"HEAD"] = remote_refs.refs[b"HEAD"]
+        try:
+            # ensure local HEAD matches remote
+            local.refs[b"HEAD"] = remote_refs.refs[b"HEAD"]
+        except ValueError:
+            raise PoetryRuntimeError.create(
+                reason=f"<error>Failed to clone {url} at '{refspec.key}', verify ref exists on remote.</>",
+                info=[
+                    ERROR_MESSAGE_NOTE,
+                    ERROR_MESSAGE_PROBLEMS_SECTION_START,
+                    ERROR_MESSAGE_BAD_REVISION.format(revision=refspec.key),
+                    f"\nThis particular error is prevalent when {refspec.key} could not be resolved to a specific commit sha.",
+                ],
+            )
 
         if refspec.is_ref:
             # set ref to current HEAD
@@ -305,17 +370,14 @@ class Git:
             if isinstance(e, AssertionError) and "Invalid object name" not in str(e):
                 raise
 
-            logger.debug(
-                "\nRequested ref (<c2>%s</c2>) was not fetched to local copy and"
-                " cannot be used. The following error was"
-                " raised:\n\n\t<warning>%s</>",
-                refspec.key,
-                e,
-            )
-
-            raise PoetryConsoleError(
-                f"Failed to clone {url} at '{refspec.key}', verify ref exists on"
-                " remote."
+            raise PoetryRuntimeError.create(
+                reason=f"<error>Failed to clone {url} at '{refspec.key}', verify ref exists on remote.</>",
+                info=[
+                    ERROR_MESSAGE_NOTE,
+                    ERROR_MESSAGE_PROBLEMS_SECTION_START,
+                    ERROR_MESSAGE_BAD_REVISION.format(revision=refspec.key),
+                ],
+                exception=e,
             )
 
         return local
@@ -326,57 +388,70 @@ class Git:
         Helper method to identify configured submodules and clone them recursively.
         """
         repo_root = Path(repo.path)
-        modules_config = repo_root.joinpath(".gitmodules")
+        for submodule in cls._get_submodules(repo):
+            path_absolute = repo_root / submodule.path
+            source_root = path_absolute.parent
+            source_root.mkdir(parents=True, exist_ok=True)
+            cls.clone(
+                url=submodule.url,
+                source_root=source_root,
+                name=path_absolute.name,
+                revision=submodule.revision,
+                clean=path_absolute.exists()
+                and not path_absolute.joinpath(".git").is_dir(),
+            )
 
-        # A relative URL by definition starts with ../ or ./
-        relative_submodule_regex = re.compile(r"^\.{1,2}/")
+    @classmethod
+    def _get_submodules(cls, repo: Repo) -> list[SubmoduleInfo]:
+        modules_config = Path(repo.path, ".gitmodules")
 
-        if modules_config.exists():
-            config = ConfigFile.from_path(str(modules_config))
+        if not modules_config.exists():
+            return []
 
-            url: bytes
-            path: bytes
-            submodules = parse_submodules(config)
+        config = ConfigFile.from_path(str(modules_config))
 
-            for path, url, name in submodules:
-                path_relative = Path(path.decode("utf-8"))
-                path_absolute = repo_root.joinpath(path_relative)
+        submodules: list[SubmoduleInfo] = []
+        for path, url, name in parse_submodules(config):
+            url_str = url.decode("utf-8")
+            path_str = path.decode("utf-8")
+            name_str = name.decode("utf-8")
 
-                url_string = url.decode("utf-8")
-                if relative_submodule_regex.search(url_string):
-                    url_string = urljoin(f"{Git.get_remote_url(repo)}/", url_string)
+            if RELATIVE_SUBMODULE_REGEX.search(url_str):
+                url_str = urlpathjoin(f"{cls.get_remote_url(repo)}/", url_str)
 
-                source_root = path_absolute.parent
-                source_root.mkdir(parents=True, exist_ok=True)
+            with repo:
+                index = repo.open_index()
 
-                with repo:
-                    try:
-                        revision = repo.open_index()[path].sha.decode("utf-8")
-                    except KeyError:
-                        logger.debug(
-                            "Skip submodule %s in %s, path %s not found",
-                            name,
-                            repo.path,
-                            path,
-                        )
-                        continue
+                try:
+                    entry = index[path]
+                except KeyError:
+                    logger.debug(
+                        "Skip submodule %s in %s, path %s not found",
+                        name,
+                        repo.path,
+                        path,
+                    )
+                    continue
 
-                cls.clone(
-                    url=url_string,
-                    source_root=source_root,
-                    name=path_relative.name,
+                assert isinstance(entry, IndexEntry)
+                revision = entry.sha.decode("utf-8")
+
+            submodules.append(
+                SubmoduleInfo(
+                    path=path_str,
+                    url=url_str,
+                    name=name_str,
                     revision=revision,
-                    clean=path_absolute.exists()
-                    and not path_absolute.joinpath(".git").is_dir(),
                 )
+            )
+
+        return submodules
 
     @staticmethod
     def is_using_legacy_client() -> bool:
         from poetry.config.config import Config
 
-        legacy_client: bool = Config.create().get(
-            "experimental.system-git-client", False
-        )
+        legacy_client: bool = Config.create().get("system-git-client", False)
         return legacy_client
 
     @staticmethod
@@ -413,7 +488,8 @@ class Git:
                     current_repo = Repo(str(target))
 
                     with current_repo:
-                        current_sha = current_repo.head().decode("utf-8")
+                        # we use peeled sha here to ensure tags are resolved consistently
+                        current_sha = current_repo.get_peeled(b"HEAD").decode("utf-8")
                 except (NotGitRepository, AssertionError, KeyError):
                     # something is wrong with the current checkout, clean it
                     remove_directory(target, force=True)
@@ -450,3 +526,31 @@ class Git:
 
         # fallback to legacy git client
         return cls._clone_legacy(url=url, refspec=refspec, target=target)
+
+
+def urlpathjoin(base: str, path: str) -> str:
+    """
+    Allow any URL to be joined with a path
+
+    This works around an issue with urllib.parse.urljoin where it only handles
+    relative URLs for protocols contained in urllib.parse.uses_relative. As it
+    happens common protocols used with git, like ssh or git+ssh are not in that
+    list.
+
+    Thus we need to implement our own version of urljoin that handles all URLs
+    protocols. This is accomplished by using urlparse and urlunparse to split
+    the URL into its components, join the path, and then reassemble the URL.
+
+    See: https://github.com/python-poetry/poetry/issues/6499#issuecomment-1564712609
+    """
+    parsed_base = urlparse(base)
+    new = parsed_base._replace(path=urljoin(parsed_base.path, path))
+    return urlunparse(new)
+
+
+@dataclasses.dataclass
+class SubmoduleInfo:
+    path: str
+    url: str
+    name: str
+    revision: str

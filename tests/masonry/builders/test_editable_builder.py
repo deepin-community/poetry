@@ -2,23 +2,24 @@ from __future__ import annotations
 
 import csv
 import json
-import locale
 import os
 import shutil
 
 from pathlib import Path
 from typing import TYPE_CHECKING
-from typing import Iterator
 
 import pytest
 
 from cleo.io.null_io import NullIO
-from deepdiff import DeepDiff
+from deepdiff.diff import DeepDiff
 from poetry.core.constraints.version import Version
+from poetry.core.masonry.metadata import Metadata
+from poetry.core.packages.package import Package
 
 from poetry.factory import Factory
 from poetry.masonry.builders.editable import EditableBuilder
 from poetry.repositories.installed_repository import InstalledRepository
+from poetry.utils._compat import getencoding
 from poetry.utils.env import EnvCommandError
 from poetry.utils.env import EnvManager
 from poetry.utils.env import MockEnv
@@ -27,6 +28,8 @@ from poetry.utils.env import ephemeral_environment
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from pytest_mock import MockerFixture
 
     from poetry.poetry import Poetry
@@ -85,9 +88,40 @@ def tmp_venv(tmp_path: Path, env_manager: EnvManager) -> Iterator[VirtualEnv]:
     shutil.rmtree(str(venv.path))
 
 
+@pytest.fixture()
+def bad_scripts_no_colon(fixture_dir: FixtureDirGetter) -> Poetry:
+    poetry = Factory().create_poetry(fixture_dir("bad_scripts_project/no_colon"))
+
+    return poetry
+
+
+@pytest.fixture()
+def bad_scripts_too_many_colon(fixture_dir: FixtureDirGetter) -> Poetry:
+    poetry = Factory().create_poetry(fixture_dir("bad_scripts_project/too_many_colon"))
+
+    return poetry
+
+
+def expected_metadata_version() -> str:
+    # Get the metadata version that we should expect: which is poetry-core's default
+    # value.
+    metadata = Metadata()
+    return metadata.metadata_version
+
+
+@pytest.mark.parametrize("project", ("simple_project", "simple_project_legacy"))
 def test_builder_installs_proper_files_for_standard_packages(
-    simple_poetry: Poetry, tmp_venv: VirtualEnv
+    project: str,
+    simple_poetry: Poetry,
+    tmp_path: Path,
+    fixture_dir: FixtureDirGetter,
 ) -> None:
+    simple_poetry = Factory().create_poetry(fixture_dir(project))
+    env_manager = EnvManager(simple_poetry)
+    venv_path = tmp_path / "venv"
+    env_manager.build_venv(venv_path)
+    tmp_venv = VirtualEnv(venv_path)
+
     builder = EditableBuilder(simple_poetry, tmp_venv, NullIO())
 
     builder.build()
@@ -97,7 +131,9 @@ def test_builder_installs_proper_files_for_standard_packages(
     assert tmp_venv.site_packages.exists(pth_file)
     assert (
         simple_poetry.file.path.parent.resolve().as_posix()
-        == tmp_venv.site_packages.find(pth_file)[0].read_text().strip(os.linesep)
+        == tmp_venv.site_packages.find(pth_file)[0]
+        .read_text(encoding="utf-8")
+        .strip(os.linesep)
     )
 
     dist_info = Path("simple_project-1.2.3.dist-info")
@@ -116,42 +152,39 @@ def test_builder_installs_proper_files_for_standard_packages(
             "dir_info": {"editable": True},
             "url": simple_poetry.file.path.parent.as_uri(),
         },
-        json.loads(dist_info.joinpath("direct_url.json").read_text()),
+        json.loads(dist_info.joinpath("direct_url.json").read_text(encoding="utf-8")),
     )
 
-    assert dist_info.joinpath("INSTALLER").read_text() == "poetry"
+    assert dist_info.joinpath("INSTALLER").read_text(encoding="utf-8") == "poetry"
     assert (
-        dist_info.joinpath("entry_points.txt").read_text()
+        dist_info.joinpath("entry_points.txt").read_text(encoding="utf-8")
         == "[console_scripts]\nbaz=bar:baz.boom.bim\nfoo=foo:bar\n"
         "fox=fuz.foo:bar.baz\n\n"
     )
-
-    metadata = """\
-Metadata-Version: 2.1
+    python_classifiers = "\n".join(
+        f"Classifier: Programming Language :: Python :: {version}"
+        for version in sorted(
+            Package.AVAILABLE_PYTHONS,
+            key=lambda x: tuple(map(int, x.split("."))),
+        )
+    )
+    metadata_version = expected_metadata_version()
+    metadata = f"""\
+Metadata-Version: {metadata_version}
 Name: simple-project
 Version: 1.2.3
 Summary: Some description.
-Home-page: https://python-poetry.org
 License: MIT
 Keywords: packaging,dependency,poetry
 Author: Sébastien Eustace
 Author-email: sebastien@eustace.io
 Requires-Python: >=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*
 Classifier: License :: OSI Approved :: MIT License
-Classifier: Programming Language :: Python :: 2
-Classifier: Programming Language :: Python :: 2.7
-Classifier: Programming Language :: Python :: 3
-Classifier: Programming Language :: Python :: 3.4
-Classifier: Programming Language :: Python :: 3.5
-Classifier: Programming Language :: Python :: 3.6
-Classifier: Programming Language :: Python :: 3.7
-Classifier: Programming Language :: Python :: 3.8
-Classifier: Programming Language :: Python :: 3.9
-Classifier: Programming Language :: Python :: 3.10
-Classifier: Programming Language :: Python :: 3.11
+{python_classifiers}
 Classifier: Topic :: Software Development :: Build Tools
 Classifier: Topic :: Software Development :: Libraries :: Python Modules
 Project-URL: Documentation, https://python-poetry.org/docs
+Project-URL: Homepage, https://python-poetry.org
 Project-URL: Repository, https://github.com/python-poetry/poetry
 Description-Content-Type: text/x-rst
 
@@ -187,7 +220,7 @@ if __name__ == '__main__':
     sys.exit(baz.boom.bim())
 """
 
-    assert baz_script == tmp_venv._bin_dir.joinpath("baz").read_text()
+    assert baz_script == tmp_venv._bin_dir.joinpath("baz").read_text(encoding="utf-8")
 
     foo_script = f"""\
 #!{tmp_venv.python}
@@ -198,7 +231,7 @@ if __name__ == '__main__':
     sys.exit(bar())
 """
 
-    assert foo_script == tmp_venv._bin_dir.joinpath("foo").read_text()
+    assert foo_script == tmp_venv._bin_dir.joinpath("foo").read_text(encoding="utf-8")
 
     fox_script = f"""\
 #!{tmp_venv.python}
@@ -209,7 +242,7 @@ if __name__ == '__main__':
     sys.exit(bar.baz())
 """
 
-    assert fox_script == tmp_venv._bin_dir.joinpath("fox").read_text()
+    assert fox_script == tmp_venv._bin_dir.joinpath("fox").read_text(encoding="utf-8")
 
 
 def test_builder_falls_back_on_setup_and_pip_for_packages_with_build_scripts(
@@ -223,9 +256,10 @@ def test_builder_falls_back_on_setup_and_pip_for_packages_with_build_scripts(
     pip_install.assert_called_once_with(
         extended_poetry.pyproject.file.path.parent, env, upgrade=True, editable=True
     )
-    assert [] == env.executed
+    assert env.executed == []
 
 
+@pytest.mark.network
 def test_builder_setup_generation_runs_with_pip_editable(
     fixture_dir: FixtureDirGetter, tmp_path: Path
 ) -> None:
@@ -239,7 +273,7 @@ def test_builder_setup_generation_runs_with_pip_editable(
     poetry = Factory().create_poetry(extended_project)
 
     # we need a venv with pip and setuptools since we are verifying setup.py builds
-    with ephemeral_environment(flags={"no-setuptools": False, "no-pip": False}) as venv:
+    with ephemeral_environment(flags={"no-pip": False}) as venv:
         builder = EditableBuilder(poetry, venv, NullIO())
         builder.build()
 
@@ -276,7 +310,7 @@ def test_builder_installs_proper_files_when_packages_configured(
     pth_file = tmp_venv.site_packages.find(pth_file)[0]
 
     paths = set()
-    with pth_file.open(encoding=locale.getpreferredencoding()) as f:
+    with pth_file.open(encoding=getencoding()) as f:
         for line in f.readlines():
             line = line.strip(os.linesep)
             if line:
@@ -302,19 +336,26 @@ def test_builder_generates_proper_metadata_when_multiple_readme_files(
     dist_info = tmp_venv.site_packages.find(dist_info)[0]
     assert dist_info.joinpath("METADATA").exists()
 
-    metadata = """\
-Metadata-Version: 2.1
+    metadata_version = expected_metadata_version()
+    metadata = f"""\
+Metadata-Version: {metadata_version}
 Name: my-package
 Version: 0.1
 Summary: Some description.
-Home-page: https://python-poetry.org
 License: MIT
 Author: Your Name
 Author-email: you@example.com
-Requires-Python: >=2.7,<3.0
+Requires-Python: >=3.7,<4.0
 Classifier: License :: OSI Approved :: MIT License
-Classifier: Programming Language :: Python :: 2
-Classifier: Programming Language :: Python :: 2.7
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.7
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Programming Language :: Python :: 3.13
+Project-URL: Homepage, https://python-poetry.org
 Description-Content-Type: text/x-rst
 
 Single Python
@@ -342,3 +383,30 @@ def test_builder_should_execute_build_scripts(
     assert [
         ["python", str(extended_without_setup_poetry.file.path.parent / "build.py")]
     ] == env.executed
+
+
+def test_builder_catches_bad_scripts_no_colon(
+    bad_scripts_no_colon: Poetry, tmp_venv: VirtualEnv
+) -> None:
+    builder = EditableBuilder(bad_scripts_no_colon, tmp_venv, NullIO())
+    with pytest.raises(ValueError, match=r"Bad script.*") as e:
+        builder.build()
+    msg = str(e.value)
+    # We should print out the problematic script entry
+    assert "bar.bin.foo" in msg
+    # and some hint about what to do
+    assert "Hint:" in msg
+    assert 'foo = "bar.bin.foo:main"' in msg
+
+
+def test_builder_catches_bad_scripts_too_many_colon(
+    bad_scripts_too_many_colon: Poetry, tmp_venv: VirtualEnv
+) -> None:
+    builder = EditableBuilder(bad_scripts_too_many_colon, tmp_venv, NullIO())
+    with pytest.raises(ValueError, match=r"Bad script.*") as e:
+        builder.build()
+    msg = str(e.value)
+    # We should print out the problematic script entry
+    assert "foo::bar" in msg
+    # and some hint about what is wrong
+    assert "Too many" in msg

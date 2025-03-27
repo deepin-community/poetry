@@ -70,9 +70,7 @@ commands respectively.
         }
 
         for group in [ApplicationPlugin.group, Plugin.group]:
-            for entry_point in PluginManager(group).get_plugin_entry_points(
-                env=system_env
-            ):
+            for entry_point in PluginManager(group).get_plugin_entry_points():
                 assert entry_point.dist is not None
 
                 package = packages_by_name[canonicalize_name(entry_point.dist.name)]
@@ -88,7 +86,7 @@ commands respectively.
             package = info.package
             description = " " + package.description if package.description else ""
             self.line("")
-            self.line(f"  • <c1>{name}</c1> (<c2>{package.version}</c2>){description}")
+            self.line(f"  - <c1>{name}</c1> (<c2>{package.version}</c2>){description}")
             provide_line = "     "
 
             if info.plugins:

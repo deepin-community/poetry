@@ -2,44 +2,35 @@ from __future__ import annotations
 
 import json
 
-from pathlib import Path
+from importlib.resources import files
 from typing import Any
 
-import jsonschema
+import fastjsonschema
 
-from poetry.core.json import SCHEMA_DIR as CORE_SCHEMA_DIR
-
-
-SCHEMA_DIR = Path(__file__).parent / "schemas"
-
-
-class ValidationError(ValueError):
-    pass
+from fastjsonschema.exceptions import JsonSchemaValueException
 
 
 def validate_object(obj: dict[str, Any]) -> list[str]:
-    schema_file = Path(SCHEMA_DIR, "poetry.json")
-    schema = json.loads(schema_file.read_text(encoding="utf-8"))
-
-    validator = jsonschema.Draft7Validator(schema)
-    validation_errors = sorted(validator.iter_errors(obj), key=lambda e: e.path)
-
-    errors = []
-
-    for error in validation_errors:
-        message = error.message
-        if error.path:
-            path = ".".join(str(x) for x in error.absolute_path)
-            message = f"[{path}] {message}"
-
-        errors.append(message)
-
-    core_schema = json.loads(
-        (CORE_SCHEMA_DIR / "poetry-schema.json").read_text(encoding="utf-8")
+    schema = json.loads(
+        (files(__package__) / "schemas" / "poetry.json").read_text(encoding="utf-8")
     )
 
-    properties = {*schema["properties"].keys(), *core_schema["properties"].keys()}
-    additional_properties = set(obj.keys()) - properties
+    validate = fastjsonschema.compile(schema)
+
+    errors = []
+    try:
+        validate(obj)
+    except JsonSchemaValueException as e:
+        errors = [e.message]
+
+    core_schema = json.loads(
+        (files("poetry.core") / "json" / "schemas" / "poetry-schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    properties = schema["properties"].keys() | core_schema["properties"].keys()
+    additional_properties = obj.keys() - properties
     for key in additional_properties:
         errors.append(f"Additional properties are not allowed ('{key}' was unexpected)")
 

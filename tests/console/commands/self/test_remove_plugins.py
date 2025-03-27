@@ -48,14 +48,13 @@ def install_plugin(installed: Repository) -> None:
                 "optional": False,
                 "platform": "*",
                 "python-versions": "*",
-                "checksum": [],
+                "files": [],
             },
         ],
         "metadata": {
+            "lock-version": "2.0",
             "python-versions": "^3.6",
-            "platform": "*",
             "content-hash": "123456789",
-            "files": {"poetry-plugin": []},
         },
     }
     system_pyproject_file.parent.joinpath("poetry.lock").write_text(
@@ -74,7 +73,7 @@ Resolving dependencies...
 
 Package operations: 0 installs, 0 updates, 1 removal
 
-  • Removing poetry-plugin (1.2.3)
+  - Removing poetry-plugin (1.2.3)
 
 Writing lock file
 """
@@ -95,8 +94,8 @@ Resolving dependencies...
 
 Package operations: 0 installs, 0 updates, 1 removal, 1 skipped
 
-  • Removing poetry-plugin (1.2.3)
-  • Installing poetry ({__version__}): Skipped for the following reason: Already \
+  - Removing poetry-plugin (1.2.3)
+  - Installing poetry ({__version__}): Skipped for the following reason: Already \
 installed
 """
 

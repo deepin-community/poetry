@@ -10,7 +10,7 @@ Build-Depends: debhelper-compat (= 13),
                python3-all-dev,
                python3-cachecontrol (>= 0.12.6),
                python3-cachy (>= 0.3.0),
-               python3-cleo (>= 0.8.1),
+               python3-cleo (>= 2.2.1),
                python3-clikit (>= 0.6.2),
                python3-crashtest (>= 0.3.1),
                python3-deepdiff <!nocheck>,
@@ -19,11 +19,12 @@ Build-Depends: debhelper-compat (= 13),
                python3-httpretty (>= 1.0.5) <!nocheck>,
                python3-jsonschema (>= 3.2.0),
                python3-keyring (>= 22.0.1),
-               python3-lockfile (>= 1:0.12.2),
+               python3-packaging,
                python3-pexpect (>= 4.8.0),
                python3-pip,
                python3-pkginfo (>= 1.7.0),
-               python3-poetry-core (>= 1.6.1),
+               python3-poetry-core (>= 2.1.1),
+               python3-poetry-plugin-export,
                python3-pyparsing (>= 2.4.7) <!nocheck>,
                python3-pyrsistent (>= 0.15.5) <!nocheck>,
                python3-pytest (>= 6.0.2) <!nocheck>,
@@ -36,9 +37,9 @@ Build-Depends: debhelper-compat (= 13),
                python3-trove-classifiers,
                python3-venv,
                python3-virtualenv (>= 20.4.0),
-               python3-pyproject-hooks,
-               python3.11-venv,
-Standards-Version: 4.6.2
+               python3-findpython,
+               python3-pbs-installer,
+Standards-Version: 4.7.0
 Homepage: https://python-poetry.org/
 Rules-Requires-Root: no
 Vcs-Browser: https://salsa.debian.org/python-team/packages/poetry
@@ -46,9 +47,9 @@ Vcs-Git: https://salsa.debian.org/python-team/packages/poetry.git
 
 Package: python3-poetry
 Architecture: all
-Depends: python3-lockfile (>= 1:0.12.2),
-         ${misc:Depends},
+Depends: ${misc:Depends},
          ${python3:Depends},
+Recommends: python3-trove-classifiers,
 Description: Python dependency management and packaging made easy (Python 3)
  Poetry helps you declare, manage and install dependencies of Python
  projects, ensuring you have the right stack everywhere.

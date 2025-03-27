@@ -53,8 +53,12 @@ For more information see the [lock command]({{< relref "cli#lock" >}}).
 The `poetry-export` hook calls the `poetry export` command
 to sync your `requirements.txt` file with your current dependencies.
 
+{{% warning %}}
+This hook is provided by the [Export Poetry Plugin](https://github.com/python-poetry/poetry-plugin-export).
+{{% /warning %}}
+
 {{% note %}}
-It is recommended to run the [`poetry-lock`](#poetry-lock) hook prior to this one.
+It is recommended to run the [`poetry-lock`](#poetry-lock) hook or [`poetry-check`](#poetry-check) with argument `--lock` prior to this one.
 {{% /note %}}
 
 ### Arguments
@@ -83,6 +87,17 @@ hooks:
     args: ["--dev", "-f", "requirements.txt", "-o", "requirements.txt"]
 ```
 
+## poetry-install
+
+The `poetry-install` hook calls the `poetry install` command to make sure all locked packages are installed.
+In order to install this hook, you either need to specify `default_install_hook_types`, or you have
+to install it via `pre-commit install --install-hooks -t post-checkout -t post-merge`.
+
+### Arguments
+
+The hook takes the same arguments as the poetry command.
+For more information see the [install command]({{< relref "cli#install" >}}).
+
 ## Usage
 
 For more information on how to use pre-commit please see the [official documentation](https://pre-commit.com/).
@@ -97,6 +112,7 @@ repos:
     -   id: poetry-check
     -   id: poetry-lock
     -   id: poetry-export
+    -   id: poetry-install
 ```
 
 A `.pre-commit-config.yaml` example for a monorepo setup or if the `pyproject.toml` file is not in the root directory:
@@ -112,6 +128,8 @@ repos:
         args: ["-C", "./subdirectory"]
     -   id: poetry-export
         args: ["-C", "./subdirectory", "-f", "requirements.txt", "-o", "./subdirectory/requirements.txt"]
+    -   id: poetry-install
+        args: ["-C", "./subdirectory"]
 ```
 
 ## FAQ
@@ -134,3 +152,30 @@ Thus, `pre-commit autoupdate` is not usable for the hooks described here.
 You can avoid changing the `rev` to an unexpected value by using the `--repo` parameter (may be specified multiple
 times), to explicitly list repositories that should be updated. An option to explicitly exclude
 repositories [will not be implemented](https://github.com/pre-commit/pre-commit/issues/1959) into `pre-commit`.
+
+### Are there any alternatives to `pre-commit autoupdate`?
+
+You may use [pre-commit-update](https://pypi.org/project/pre-commit-update/) as an alternative to
+`pre-commit autoupdate`.
+
+Since `pre-commit-update` can be used as a pre-commit hook itself, the easiest way
+to make use of it would be to include it inside `.pre-commit-config.yaml`:
+
+```yaml
+repos:
+-   repo: https://gitlab.com/vojko.pribudic.foss/pre-commit-update
+    rev: v0.5.1post1
+    hooks:
+    -   id: pre-commit-update
+-   repo: https://github.com/python-poetry/poetry
+    rev: 1.8.3
+    hooks:
+    -   id: poetry-check
+    -   id: poetry-lock
+    -   id: poetry-export
+    -   id: poetry-install
+```
+
+Your `.pre-commit-config.yaml` repos will be checked and updated every time pre-commit hooks run.
+
+For more advanced configuration, please check the `pre-commit-update` documentation.

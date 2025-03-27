@@ -1,19 +1,22 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 
-from collections import defaultdict
 from typing import TYPE_CHECKING
 from typing import Any
 
 import requests
+import requests.adapters
 
 from cachecontrol.controller import logger as cache_control_logger
+from poetry.core.packages.dependency import Dependency
 from poetry.core.packages.package import Package
 from poetry.core.packages.utils.link import Link
-from poetry.core.version.exceptions import InvalidVersion
+from poetry.core.version.exceptions import InvalidVersionError
+from poetry.core.version.requirements import InvalidRequirementError
 
-from poetry.repositories.exceptions import PackageNotFound
+from poetry.repositories.exceptions import PackageNotFoundError
 from poetry.repositories.http_repository import HTTPRepository
 from poetry.repositories.link_sources.json import SimpleJsonPage
 from poetry.repositories.parsers.pypi_search_parser import SearchResultParser
@@ -29,6 +32,8 @@ if TYPE_CHECKING:
     from poetry.core.constraints.version import Version
     from poetry.core.constraints.version import VersionConstraint
 
+    from poetry.config.config import Config
+
 SUPPORTED_PACKAGE_TYPES = {"sdist", "bdist_wheel"}
 
 
@@ -36,20 +41,27 @@ class PyPiRepository(HTTPRepository):
     def __init__(
         self,
         url: str = "https://pypi.org/",
+        *,
+        config: Config | None = None,
         disable_cache: bool = False,
+        pool_size: int = requests.adapters.DEFAULT_POOLSIZE,
         fallback: bool = True,
     ) -> None:
         super().__init__(
-            "PyPI", url.rstrip("/") + "/simple/", disable_cache=disable_cache
+            "PyPI",
+            url.rstrip("/") + "/simple/",
+            config=config,
+            disable_cache=disable_cache,
+            pool_size=pool_size,
         )
 
         self._base_url = url
         self._fallback = fallback
 
-    def search(self, query: str) -> list[Package]:
+    def search(self, query: str | list[str]) -> list[Package]:
         results = []
 
-        response = requests.session().get(
+        response = requests.get(
             self._base_url + "search", params={"q": query}, timeout=REQUESTS_TIMEOUT
         )
         parser = SearchResultParser()
@@ -60,12 +72,24 @@ class PyPiRepository(HTTPRepository):
                 package = Package(result.name, result.version)
                 package.description = result.description.strip()
                 results.append(package)
-            except InvalidVersion:
+            except InvalidVersionError:
                 self._log(
                     f'Unable to parse version "{result.version}" for the'
                     f" {result.name} package, skipping",
                     level="debug",
                 )
+
+        if not results:
+            # in cases like PyPI search might not be available, we fallback to explicit searches
+            # to allow for a nicer ux rather than finding nothing at all
+            # see: https://discuss.python.org/t/fastly-interfering-with-pypi-search/73597/6
+            #
+            tokens = query if isinstance(query, list) else [query]
+            for token in tokens:
+                with contextlib.suppress(InvalidRequirementError):
+                    results.extend(
+                        self.find_packages(Dependency.create_from_pep_508(token))
+                    )
 
         return results
 
@@ -86,7 +110,7 @@ class PyPiRepository(HTTPRepository):
         """
         try:
             json_page = self.get_page(name)
-        except PackageNotFound:
+        except PackageNotFoundError:
             self._log(f"No packages found for {name}", level="debug")
             return []
 
@@ -102,7 +126,7 @@ class PyPiRepository(HTTPRepository):
         headers = {"Accept": "application/vnd.pypi.simple.v1+json"}
         info = self._get(f"simple/{name}/", headers=headers)
         if info is None:
-            raise PackageNotFound(f"Package [{name}] not found.")
+            raise PackageNotFoundError(f"Package [{name}] not found.")
 
         return info
 
@@ -128,7 +152,7 @@ class PyPiRepository(HTTPRepository):
 
         json_data = self._get(f"pypi/{name}/{version}/json")
         if json_data is None:
-            raise PackageNotFound(f"Package [{name}] not found.")
+            raise PackageNotFoundError(f"Package [{name}] not found.")
 
         info = json_data["info"]
 
@@ -138,7 +162,6 @@ class PyPiRepository(HTTPRepository):
             summary=info["summary"],
             requires_dist=info["requires_dist"],
             requires_python=info["requires_python"],
-            files=info.get("files", []),
             yanked=self._get_yanked(info),
             cache_version=str(self.CACHE_VERSION),
         )
@@ -148,35 +171,30 @@ class PyPiRepository(HTTPRepository):
         except KeyError:
             version_info = []
 
+        files = info.get("files", [])
         for file_info in version_info:
             if file_info["packagetype"] in SUPPORTED_PACKAGE_TYPES:
-                data.files.append(
+                files.append(
                     {
                         "file": file_info["filename"],
                         "hash": "sha256:" + file_info["digests"]["sha256"],
                     }
                 )
+        data.files = files
 
         if self._fallback and data.requires_dist is None:
-            self._log("No dependencies found, downloading archives", level="debug")
+            self._log(
+                "No dependencies found, downloading metadata and/or archives",
+                level="debug",
+            )
             # No dependencies set (along with other information)
             # This might be due to actually no dependencies
-            # or badly set metadata when uploading
+            # or badly set metadata when uploading.
             # So, we need to make sure there is actually no
-            # dependencies by introspecting packages
-            urls = defaultdict(list)
-            for url in json_data["urls"]:
-                # Only get sdist and wheels if they exist
-                dist_type = url["packagetype"]
-                if dist_type not in SUPPORTED_PACKAGE_TYPES:
-                    continue
-
-                urls[dist_type].append(url["url"])
-
-            if not urls:
-                return data.asdict()
-
-            info = self._get_info_from_urls(urls)
+            # dependencies by introspecting packages.
+            page = self.get_page(name)
+            links = list(page.links_for_version(name, version))
+            info = self._get_info_from_links(links, ignore_yanked=not data.yanked)
 
             data.requires_dist = info.requires_dist
 

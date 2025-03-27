@@ -42,7 +42,21 @@ class HTMLPage(LinkSource):
                     yanked = unescape(yanked_value)
                 else:
                     yanked = "data-yanked" in anchor
-                link = Link(url, requires_python=pyrequire, yanked=yanked)
+
+                # see https://peps.python.org/pep-0714/#clients
+                # and https://peps.python.org/pep-0658/#specification
+                metadata: str | bool
+                for metadata_key in ("data-core-metadata", "data-dist-info-metadata"):
+                    metadata_value = anchor.get(metadata_key)
+                    if metadata_value:
+                        metadata = unescape(metadata_value)
+                    else:
+                        metadata = metadata_key in anchor
+                    if metadata:
+                        break
+                link = Link(
+                    url, requires_python=pyrequire, yanked=yanked, metadata=metadata
+                )
 
                 if link.ext not in self.SUPPORTED_FORMATS:
                     continue
@@ -54,8 +68,36 @@ class HTMLPage(LinkSource):
         return links
 
 
-class SimpleRepositoryPage(HTMLPage):
-    def __init__(self, url: str, content: str) -> None:
-        if not url.endswith("/"):
-            url += "/"
-        super().__init__(url=url, content=content)
+class SimpleRepositoryRootPage:
+    """
+    This class represents the parsed content of a "simple" repository's root page. This follows the
+    specification laid out in PEP 503.
+
+    See: https://peps.python.org/pep-0503/
+    """
+
+    def __init__(self, content: str | None = None) -> None:
+        parser = HTMLPageParser()
+        parser.feed(content or "")
+        self._parsed = parser.anchors
+
+    def search(self, query: str | list[str]) -> list[str]:
+        results: list[str] = []
+        tokens = query if isinstance(query, list) else [query]
+
+        for anchor in self._parsed:
+            href = anchor.get("href")
+            if href and any(token in href for token in tokens):
+                results.append(href.rstrip("/"))
+
+        return results
+
+    @cached_property
+    def package_names(self) -> list[str]:
+        results: list[str] = []
+
+        for anchor in self._parsed:
+            if href := anchor.get("href"):
+                results.append(href.rstrip("/"))
+
+        return results

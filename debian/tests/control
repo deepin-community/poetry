@@ -17,6 +17,12 @@ Depends: gcc,
          python3-tomlkit,
          python3-trove-classifiers,
          python3-venv,
-         python3.11-venv,
          @,
 Restrictions: allow-stderr, needs-root
+
+Tests: simple-commands-run
+Depends: @
+Restrictions: allow-stderr, needs-root, needs-internet
+
+Test-Command: poetry -v
+Restrictions: superficial
