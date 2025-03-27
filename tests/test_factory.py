@@ -7,12 +7,15 @@ from typing import Any
 import pytest
 
 from cleo.io.buffered_io import BufferedIO
-from deepdiff import DeepDiff
+from deepdiff.diff import DeepDiff
 from packaging.utils import canonicalize_name
+from poetry.core.constraints.version import Version
 from poetry.core.constraints.version import parse_constraint
+from poetry.core.packages.package import Package
 from poetry.core.packages.vcs_dependency import VCSDependency
 
-from poetry.exceptions import PoetryException
+from poetry.__version__ import __version__
+from poetry.exceptions import PoetryError
 from poetry.factory import Factory
 from poetry.plugins.plugin import Plugin
 from poetry.repositories.exceptions import InvalidSourceError
@@ -131,15 +134,18 @@ def test_create_poetry(fixture_dir: FixtureDirGetter) -> None:
 
     assert package.all_classifiers == [
         "License :: OSI Approved :: MIT License",
-        "Programming Language :: Python :: 2",
-        "Programming Language :: Python :: 2.7",
-        "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.6",
-        "Programming Language :: Python :: 3.7",
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
-        "Programming Language :: Python :: 3.10",
-        "Programming Language :: Python :: 3.11",
+        *(
+            f"Programming Language :: Python :: {version}"
+            for version in sorted(
+                Package.AVAILABLE_PYTHONS,
+                key=lambda x: tuple(map(int, x.split("."))),
+            )
+            if package.python_constraint.allows_any(
+                parse_constraint(version + ".*")
+                if len(version) == 1
+                else Version.parse(version)
+            )
+        ),
         "Topic :: Software Development :: Build Tools",
         "Topic :: Software Development :: Libraries :: Python Modules",
     ]
@@ -148,7 +154,7 @@ def test_create_poetry(fixture_dir: FixtureDirGetter) -> None:
 @pytest.mark.parametrize(
     ("project",),
     [
-        ("simple_project",),
+        ("simple_project_legacy",),
         ("project_with_extras",),
     ],
 )
@@ -192,19 +198,27 @@ def test_create_poetry_with_packages_and_includes(
     package = poetry.package
 
     assert package.packages == [
-        {"include": "extra_dir/**/*.py"},
-        {"include": "extra_dir/**/*.py"},
-        {"include": "my_module.py"},
-        {"include": "package_with_include"},
-        {"include": "tests", "format": "sdist"},
+        {"include": "extra_dir/**/*.py", "format": ["sdist", "wheel"]},
+        {"include": "extra_dir/**/*.py", "format": ["sdist", "wheel"]},
+        {"include": "my_module.py", "format": ["sdist", "wheel"]},
+        {"include": "package_with_include", "format": ["sdist", "wheel"]},
+        {"include": "tests", "format": ["sdist"]},
         {"include": "for_wheel_only", "format": ["wheel"]},
-        {"include": "src_package", "from": "src"},
+        {"include": "src_package", "from": "src", "format": ["sdist", "wheel"]},
     ]
 
-    assert package.include == [
-        {"path": "extra_dir/vcs_excluded.txt", "format": []},
-        {"path": "notes.txt", "format": []},
-    ]
+    assert package.include in (
+        # with https://github.com/python-poetry/poetry-core/pull/773
+        [
+            {"path": "extra_dir/vcs_excluded.txt", "format": ["sdist", "wheel"]},
+            {"path": "notes.txt", "format": ["sdist"]},
+        ],
+        # without https://github.com/python-poetry/poetry-core/pull/773
+        [
+            {"path": "extra_dir/vcs_excluded.txt", "format": ["sdist"]},
+            {"path": "notes.txt", "format": ["sdist"]},
+        ],
+    )
 
 
 def test_create_poetry_with_multi_constraints_dependency(
@@ -219,112 +233,54 @@ def test_create_poetry_with_multi_constraints_dependency(
     assert len(package.requires) == 2
 
 
-def test_poetry_with_default_source_legacy(
-    fixture_dir: FixtureDirGetter, with_simple_keyring: None
-) -> None:
+def test_create_poetry_non_package_mode(fixture_dir: FixtureDirGetter) -> None:
+    poetry = Factory().create_poetry(fixture_dir("non_package_mode"))
+
+    assert not poetry.is_package_mode
+
+
+def test_create_poetry_version_ok(fixture_dir: FixtureDirGetter) -> None:
     io = BufferedIO()
-    poetry = Factory().create_poetry(fixture_dir("with_default_source_legacy"), io=io)
+    Factory().create_poetry(fixture_dir("self_version_ok"), io=io)
 
-    assert len(poetry.pool.repositories) == 1
-    assert "Found deprecated key" in io.fetch_error()
-
-
-def test_poetry_with_default_source(
-    fixture_dir: FixtureDirGetter, with_simple_keyring: None
-) -> None:
-    io = BufferedIO()
-    poetry = Factory().create_poetry(fixture_dir("with_default_source"), io=io)
-
-    assert len(poetry.pool.repositories) == 1
+    assert io.fetch_output() == ""
     assert io.fetch_error() == ""
 
 
-def test_poetry_with_default_source_and_pypi(
-    fixture_dir: FixtureDirGetter, with_simple_keyring: None
-) -> None:
-    io = BufferedIO()
-    poetry = Factory().create_poetry(fixture_dir("with_default_source_and_pypi"), io=io)
-
-    assert len(poetry.pool.repositories) == 2
-    assert poetry.pool.has_repository("PyPI")
-    assert isinstance(poetry.pool.repository("PyPI"), PyPiRepository)
-    assert poetry.pool.get_priority("PyPI") is Priority.PRIMARY
-    assert "Warning: Found deprecated key" not in io.fetch_error()
-
-
-def test_poetry_with_default_source_pypi(
-    fixture_dir: FixtureDirGetter, with_simple_keyring: None
-) -> None:
-    io = BufferedIO()
-    poetry = Factory().create_poetry(fixture_dir("with_default_source_pypi"), io=io)
-
-    assert len(poetry.pool.repositories) == 1
-    assert poetry.pool.has_repository("PyPI")
-    assert isinstance(poetry.pool.repository("PyPI"), PyPiRepository)
-    assert poetry.pool.get_priority("PyPI") is Priority.DEFAULT
+def test_create_poetry_version_not_ok(fixture_dir: FixtureDirGetter) -> None:
+    with pytest.raises(PoetryError) as e:
+        Factory().create_poetry(fixture_dir("self_version_not_ok"))
+    assert (
+        str(e.value)
+        == f"This project requires Poetry <1.2, but you are using Poetry {__version__}"
+    )
 
 
 @pytest.mark.parametrize(
     "project",
-    ("with_non_default_source_implicit", "with_non_default_source_explicit"),
+    ("with_primary_source_implicit", "with_primary_source_explicit"),
 )
-def test_poetry_with_non_default_source(
+def test_poetry_with_primary_source(
     project: str, fixture_dir: FixtureDirGetter, with_simple_keyring: None
 ) -> None:
     io = BufferedIO()
     poetry = Factory().create_poetry(fixture_dir(project), io=io)
 
-    assert not poetry.pool.has_default()
-    assert poetry.pool.has_repository("PyPI")
-    assert poetry.pool.get_priority("PyPI") is Priority.SECONDARY
-    assert isinstance(poetry.pool.repository("PyPI"), PyPiRepository)
+    assert not poetry.pool.has_repository("PyPI")
     assert poetry.pool.has_repository("foo")
     assert poetry.pool.get_priority("foo") is Priority.PRIMARY
     assert isinstance(poetry.pool.repository("foo"), LegacyRepository)
-    assert {repo.name for repo in poetry.pool.repositories} == {"PyPI", "foo"}
-    error = io.fetch_error()
-    assert "Warning: In a future version of Poetry, PyPI will be disabled" in error
+    assert {repo.name for repo in poetry.pool.repositories} == {"foo"}
 
 
-def test_poetry_with_non_default_secondary_source_legacy(
+def test_poetry_with_multiple_supplemental_sources(
     fixture_dir: FixtureDirGetter, with_simple_keyring: None
 ) -> None:
-    poetry = Factory().create_poetry(
-        fixture_dir("with_non_default_secondary_source_legacy")
-    )
+    poetry = Factory().create_poetry(fixture_dir("with_multiple_supplemental_sources"))
 
     assert poetry.pool.has_repository("PyPI")
     assert isinstance(poetry.pool.repository("PyPI"), PyPiRepository)
-    assert poetry.pool.get_priority("PyPI") is Priority.DEFAULT
-    assert poetry.pool.has_repository("foo")
-    assert isinstance(poetry.pool.repository("foo"), LegacyRepository)
-    assert {repo.name for repo in poetry.pool.repositories} == {"PyPI", "foo"}
-
-
-def test_poetry_with_non_default_secondary_source(
-    fixture_dir: FixtureDirGetter, with_simple_keyring: None
-) -> None:
-    poetry = Factory().create_poetry(fixture_dir("with_non_default_secondary_source"))
-
-    assert poetry.pool.has_repository("PyPI")
-    assert isinstance(poetry.pool.repository("PyPI"), PyPiRepository)
-    assert poetry.pool.get_priority("PyPI") is Priority.DEFAULT
-    assert poetry.pool.has_repository("foo")
-    assert isinstance(poetry.pool.repository("foo"), LegacyRepository)
-    assert {repo.name for repo in poetry.pool.repositories} == {"PyPI", "foo"}
-
-
-def test_poetry_with_non_default_multiple_secondary_sources_legacy(
-    fixture_dir: FixtureDirGetter,
-    with_simple_keyring: None,
-) -> None:
-    poetry = Factory().create_poetry(
-        fixture_dir("with_non_default_multiple_secondary_sources_legacy")
-    )
-
-    assert poetry.pool.has_repository("PyPI")
-    assert isinstance(poetry.pool.repository("PyPI"), PyPiRepository)
-    assert poetry.pool.get_priority("PyPI") is Priority.DEFAULT
+    assert poetry.pool.get_priority("PyPI") is Priority.PRIMARY
     assert poetry.pool.has_repository("foo")
     assert isinstance(poetry.pool.repository("foo"), LegacyRepository)
     assert poetry.pool.has_repository("bar")
@@ -332,87 +288,39 @@ def test_poetry_with_non_default_multiple_secondary_sources_legacy(
     assert {repo.name for repo in poetry.pool.repositories} == {"PyPI", "foo", "bar"}
 
 
-def test_poetry_with_non_default_multiple_secondary_sources(
+def test_poetry_with_multiple_sources(
     fixture_dir: FixtureDirGetter, with_simple_keyring: None
 ) -> None:
-    poetry = Factory().create_poetry(
-        fixture_dir("with_non_default_multiple_secondary_sources")
-    )
+    poetry = Factory().create_poetry(fixture_dir("with_multiple_sources"))
 
-    assert poetry.pool.has_repository("PyPI")
-    assert isinstance(poetry.pool.repository("PyPI"), PyPiRepository)
-    assert poetry.pool.get_priority("PyPI") is Priority.DEFAULT
-    assert poetry.pool.has_repository("foo")
-    assert isinstance(poetry.pool.repository("foo"), LegacyRepository)
-    assert poetry.pool.has_repository("bar")
-    assert isinstance(poetry.pool.repository("bar"), LegacyRepository)
-    assert {repo.name for repo in poetry.pool.repositories} == {"PyPI", "foo", "bar"}
-
-
-def test_poetry_with_non_default_multiple_sources_legacy(
-    fixture_dir: FixtureDirGetter, with_simple_keyring: None
-) -> None:
-    poetry = Factory().create_poetry(
-        fixture_dir("with_non_default_multiple_sources_legacy")
-    )
-
-    assert not poetry.pool.has_default()
-    assert poetry.pool.has_repository("bar")
-    assert isinstance(poetry.pool.repository("bar"), LegacyRepository)
-    assert poetry.pool.has_repository("PyPI")
-    assert poetry.pool.get_priority("PyPI") is Priority.SECONDARY
-    assert isinstance(poetry.pool.repository("PyPI"), PyPiRepository)
-    assert poetry.pool.has_repository("foo")
-    assert isinstance(poetry.pool.repository("foo"), LegacyRepository)
-    assert {repo.name for repo in poetry.pool.repositories} == {"bar", "PyPI", "foo"}
-
-
-def test_poetry_with_non_default_multiple_sources(
-    fixture_dir: FixtureDirGetter, with_simple_keyring: None
-) -> None:
-    poetry = Factory().create_poetry(fixture_dir("with_non_default_multiple_sources"))
-
-    assert not poetry.pool.has_default()
-    assert poetry.pool.has_repository("PyPI")
-    assert isinstance(poetry.pool.repository("PyPI"), PyPiRepository)
-    assert poetry.pool.get_priority("PyPI") is Priority.SECONDARY
+    assert not poetry.pool.has_repository("PyPI")
     assert poetry.pool.has_repository("bar")
     assert isinstance(poetry.pool.repository("bar"), LegacyRepository)
     assert poetry.pool.has_repository("foo")
     assert isinstance(poetry.pool.repository("foo"), LegacyRepository)
-    assert {repo.name for repo in poetry.pool.repositories} == {"PyPI", "bar", "foo"}
+    assert {repo.name for repo in poetry.pool.repositories} == {"bar", "foo"}
 
 
-def test_poetry_with_non_default_multiple_sources_pypi(
+def test_poetry_with_multiple_sources_pypi(
     fixture_dir: FixtureDirGetter, with_simple_keyring: None
 ) -> None:
     io = BufferedIO()
-    poetry = Factory().create_poetry(
-        fixture_dir("with_non_default_multiple_sources_pypi"), io=io
-    )
+    poetry = Factory().create_poetry(fixture_dir("with_multiple_sources_pypi"), io=io)
 
     assert len(poetry.pool.repositories) == 4
-    assert not poetry.pool.has_default()
     assert poetry.pool.has_repository("PyPI")
     assert isinstance(poetry.pool.repository("PyPI"), PyPiRepository)
     assert poetry.pool.get_priority("PyPI") is Priority.PRIMARY
     # PyPI must be between bar and baz!
     expected = ["bar", "PyPI", "baz", "foo"]
     assert [repo.name for repo in poetry.pool.repositories] == expected
-    error = io.fetch_error()
-    assert (
-        error.strip()
-        == "<warning>Warning: Found deprecated priority 'secondary' for source 'foo' in"
-        " pyproject.toml. Consider changing the priority to one of the"
-        " non-deprecated values: 'default', 'primary', 'supplemental', 'explicit'."
-    )
 
 
 def test_poetry_with_no_default_source(fixture_dir: FixtureDirGetter) -> None:
     poetry = Factory().create_poetry(fixture_dir("sample_project"))
 
     assert poetry.pool.has_repository("PyPI")
-    assert poetry.pool.get_priority("PyPI") is Priority.DEFAULT
+    assert poetry.pool.get_priority("PyPI") is Priority.PRIMARY
     assert isinstance(poetry.pool.repository("PyPI"), PyPiRepository)
     assert {repo.name for repo in poetry.pool.repositories} == {"PyPI"}
 
@@ -424,7 +332,7 @@ def test_poetry_with_supplemental_source(
     poetry = Factory().create_poetry(fixture_dir("with_supplemental_source"), io=io)
 
     assert poetry.pool.has_repository("PyPI")
-    assert poetry.pool.get_priority("PyPI") is Priority.DEFAULT
+    assert poetry.pool.get_priority("PyPI") is Priority.PRIMARY
     assert isinstance(poetry.pool.repository("PyPI"), PyPiRepository)
     assert poetry.pool.has_repository("supplemental")
     assert poetry.pool.get_priority("supplemental") is Priority.SUPPLEMENTAL
@@ -442,7 +350,7 @@ def test_poetry_with_explicit_source(
     assert len(poetry.pool.repositories) == 1
     assert len(poetry.pool.all_repositories) == 2
     assert poetry.pool.has_repository("PyPI")
-    assert poetry.pool.get_priority("PyPI") is Priority.DEFAULT
+    assert poetry.pool.get_priority("PyPI") is Priority.PRIMARY
     assert isinstance(poetry.pool.repository("PyPI"), PyPiRepository)
     assert poetry.pool.has_repository("explicit")
     assert isinstance(poetry.pool.repository("explicit"), LegacyRepository)
@@ -468,62 +376,56 @@ def test_poetry_with_explicit_pypi_and_other(
 def test_poetry_with_pypi_explicit_only(
     project: str, fixture_dir: FixtureDirGetter, with_simple_keyring: None
 ) -> None:
-    with pytest.raises(PoetryException) as e:
+    with pytest.raises(PoetryError) as e:
         Factory().create_poetry(fixture_dir(project))
     assert str(e.value) == "At least one source must not be configured as 'explicit'."
-
-
-def test_poetry_with_two_default_sources_legacy(
-    fixture_dir: FixtureDirGetter, with_simple_keyring: None
-) -> None:
-    with pytest.raises(ValueError) as e:
-        Factory().create_poetry(fixture_dir("with_two_default_sources_legacy"))
-
-    assert str(e.value) == "Only one repository can be the default."
-
-
-def test_poetry_with_two_default_sources(
-    fixture_dir: FixtureDirGetter, with_simple_keyring: None
-) -> None:
-    with pytest.raises(ValueError) as e:
-        Factory().create_poetry(fixture_dir("with_two_default_sources"))
-
-    assert str(e.value) == "Only one repository can be the default."
 
 
 def test_validate(fixture_dir: FixtureDirGetter) -> None:
     complete = TOMLFile(fixture_dir("complete.toml"))
     pyproject: dict[str, Any] = complete.read()
-    content = pyproject["tool"]["poetry"]
 
-    assert Factory.validate(content) == {"errors": [], "warnings": []}
+    assert Factory.validate(pyproject) == {"errors": [], "warnings": []}
 
 
 def test_validate_fails(fixture_dir: FixtureDirGetter) -> None:
     complete = TOMLFile(fixture_dir("complete.toml"))
     pyproject: dict[str, Any] = complete.read()
-    content = pyproject["tool"]["poetry"]
-    content["this key is not in the schema"] = ""
+    pyproject["tool"]["poetry"]["this key is not in the schema"] = ""
 
     expected = (
         "Additional properties are not allowed "
         "('this key is not in the schema' was unexpected)"
     )
 
-    assert Factory.validate(content) == {"errors": [expected], "warnings": []}
+    assert Factory.validate(pyproject) == {"errors": [expected], "warnings": []}
 
 
 def test_create_poetry_fails_on_invalid_configuration(
     fixture_dir: FixtureDirGetter,
 ) -> None:
     with pytest.raises(RuntimeError) as e:
-        Factory().create_poetry(fixture_dir("invalid_pyproject") / "pyproject.toml")
+        Factory().create_poetry(fixture_dir("invalid_pyproject_dep_name"))
 
     expected = """\
 The Poetry configuration is invalid:
-  - 'description' is a required property
   - Project name (invalid) is same as one of its dependencies
 """
+
+    assert str(e.value) == expected
+
+
+def test_create_poetry_fails_on_nameless_project(
+    fixture_dir: FixtureDirGetter,
+) -> None:
+    with pytest.raises(RuntimeError) as e:
+        Factory().create_poetry(fixture_dir("nameless_pyproject"))
+
+    expected = """\
+The Poetry configuration is invalid:
+  - Either [project.name] or [tool.poetry.name] is required in package mode.
+"""
+
     assert str(e.value) == expected
 
 
@@ -534,7 +436,6 @@ def test_create_poetry_with_local_config(fixture_dir: FixtureDirGetter) -> None:
     assert not poetry.config.get("virtualenvs.create")
     assert not poetry.config.get("virtualenvs.options.always-copy")
     assert not poetry.config.get("virtualenvs.options.no-pip")
-    assert not poetry.config.get("virtualenvs.options.no-setuptools")
     assert not poetry.config.get("virtualenvs.options.system-site-packages")
 
 

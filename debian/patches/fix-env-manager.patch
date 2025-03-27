@@ -1,0 +1,11 @@
+--- a/src/poetry/utils/env/base_env.py
++++ b/src/poetry/utils/env/base_env.py
+@@ -52,7 +52,7 @@
+         self._path = path
+         self._bin_dir = self._path / bin_dir
+ 
+-        self._executable = "python"
++        self._executable = "python3"
+         self._pip_executable = "pip"
+ 
+         self.find_executables()

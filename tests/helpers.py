@@ -4,11 +4,11 @@ import contextlib
 import os
 import re
 import shutil
-import sys
-import urllib.parse
 
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+import keyring
 
 from poetry.core.packages.package import Package
 from poetry.core.packages.utils.link import Link
@@ -20,15 +20,20 @@ from poetry.factory import Factory
 from poetry.installation.executor import Executor
 from poetry.packages import Locker
 from poetry.repositories import Repository
-from poetry.repositories.exceptions import PackageNotFound
+from poetry.repositories.exceptions import PackageNotFoundError
 from poetry.utils._compat import metadata
+from poetry.utils.password_manager import PoetryKeyring
 
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from collections.abc import Mapping
     from typing import Any
-    from typing import Mapping
 
+    import httpretty
+
+    from httpretty.core import HTTPrettyRequest
+    from keyring.backend import KeyringBackend
     from poetry.core.constraints.version import Version
     from poetry.core.packages.dependency import Dependency
     from pytest_mock import MockerFixture
@@ -36,9 +41,14 @@ if TYPE_CHECKING:
 
     from poetry.installation.operations.operation import Operation
     from poetry.poetry import Poetry
-    from poetry.utils.authenticator import Authenticator
+    from tests.types import HTTPrettyResponse
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures"
+FIXTURE_PATH_INSTALLATION = Path(__file__).parent / "installation" / "fixtures"
+FIXTURE_PATH_DISTRIBUTIONS = FIXTURE_PATH / "distributions"
+FIXTURE_PATH_REPOSITORIES = Path(__file__).parent / "repositories" / "fixtures"
+FIXTURE_PATH_REPOSITORIES_LEGACY = FIXTURE_PATH_REPOSITORIES / "legacy"
+FIXTURE_PATH_REPOSITORIES_PYPI = FIXTURE_PATH_REPOSITORIES / "pypi.org"
 
 # Used as a mock for latest git revision.
 MOCK_DEFAULT_GIT_REVISION = "9cf87a285a2d3fbb0b9fa621997b3acc3631ed24"
@@ -69,24 +79,16 @@ def get_dependency(
     return Factory.create_dependency(name, constraint or "*", groups=groups)
 
 
-def copy_or_symlink(source: Path, dest: Path) -> None:
-    if dest.is_symlink() or dest.is_file():
-        dest.unlink()  # missing_ok is only available in Python >= 3.8
-    elif dest.is_dir():
+def copy_path(source: Path, dest: Path) -> None:
+    if dest.is_dir():
         shutil.rmtree(dest)
-
-    # os.symlink requires either administrative privileges or developer mode on Win10,
-    # throwing an OSError if neither is active.
-    if sys.platform == "win32":
-        try:
-            os.symlink(str(source), str(dest), target_is_directory=source.is_dir())
-        except OSError:
-            if source.is_dir():
-                shutil.copytree(str(source), str(dest))
-            else:
-                shutil.copyfile(str(source), str(dest))
     else:
-        os.symlink(str(source), str(dest))
+        dest.unlink(missing_ok=True)
+
+    if source.is_dir():
+        shutil.copytree(source, dest)
+    else:
+        shutil.copyfile(source, dest)
 
 
 class MockDulwichRepo:
@@ -110,26 +112,23 @@ def mock_clone(
 
     assert parsed.resource is not None
     folder = FIXTURE_PATH / "git" / parsed.resource / path
+    assert folder.is_dir()
 
     if not source_root:
         source_root = Path(Config.create().get("cache-dir")) / "src"
 
-    dest = source_root / path
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    assert parsed.name is not None
+    dest = source_root / parsed.name
+    dest.mkdir(parents=True, exist_ok=True)
 
-    copy_or_symlink(folder, dest)
+    copy_path(folder, dest)
     return MockDulwichRepo(dest)
 
 
-def mock_download(url: str, dest: Path, session: Authenticator | None = None) -> None:
-    parts = urllib.parse.urlparse(url)
-
-    fixture = FIXTURE_PATH / parts.path.lstrip("/")
-
-    copy_or_symlink(fixture, dest)
-
-
 class TestExecutor(Executor):
+    # class name begins 'Test': tell pytest that it does not contain testcases.
+    __test__ = False
+
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
 
@@ -179,7 +178,7 @@ class PoetryTestApplication(Application):
         self._poetry.set_pool(poetry.pool)
         self._poetry.set_config(poetry.config)
         self._poetry.set_locker(
-            TestLocker(poetry.locker.lock, self._poetry.local_config)
+            TestLocker(poetry.locker.lock, self._poetry.pyproject.data)
         )
 
 
@@ -187,8 +186,8 @@ class TestLocker(Locker):
     # class name begins 'Test': tell pytest that it does not contain testcases.
     __test__ = False
 
-    def __init__(self, lock: Path, local_config: dict[str, Any]) -> None:
-        super().__init__(lock, local_config)
+    def __init__(self, lock: Path, pyproject_data: dict[str, Any]) -> None:
+        super().__init__(lock, pyproject_data)
         self._locked = False
         self._write = False
 
@@ -224,7 +223,7 @@ class TestRepository(Repository):
     def find_packages(self, dependency: Dependency) -> list[Package]:
         packages = super().find_packages(dependency)
         if len(packages) == 0:
-            raise PackageNotFound(f"Package [{dependency.name}] not found.")
+            raise PackageNotFoundError(f"Package [{dependency.name}] not found.")
 
         return packages
 
@@ -313,3 +312,57 @@ def flatten_dict(obj: Mapping[str, Any], delimiter: str = ".") -> Mapping[str, A
             yield ([], obj)
 
     return {delimiter.join(path): value for path, value in recurse_keys(obj)}
+
+
+def http_setup_redirect(
+    http: type[httpretty.httpretty], *methods: str, status_code: int = 301
+) -> None:
+    redirect_uri_regex = re.compile("^(?P<protocol>https?)://redirect.(?P<uri>.*)$")
+
+    def redirect_request_callback(
+        request: HTTPrettyRequest, uri: str, headers: dict[str, Any]
+    ) -> HTTPrettyResponse:
+        redirect_uri_match = redirect_uri_regex.match(uri)
+        assert redirect_uri_match is not None
+        redirect_uri = f"{redirect_uri_match.group('protocol')}://{redirect_uri_match.group('uri')}"
+        return status_code, {"Location": redirect_uri}, b""
+
+    for method in methods:
+        http.register_uri(
+            method,
+            redirect_uri_regex,
+            status=status_code,
+            body=redirect_request_callback,
+        )
+
+
+@contextlib.contextmanager
+def switch_working_directory(path: Path, remove: bool = False) -> Iterator[Path]:
+    original_cwd = Path.cwd()
+    os.chdir(path)
+
+    try:
+        yield path
+    finally:
+        os.chdir(original_cwd)
+
+        if remove:
+            shutil.rmtree(path, ignore_errors=True)
+
+
+@contextlib.contextmanager
+def with_working_directory(source: Path, target: Path | None = None) -> Iterator[Path]:
+    use_copy = target is not None
+
+    if use_copy:
+        assert target is not None
+        shutil.copytree(source, target)
+
+    with switch_working_directory(target or source, remove=use_copy) as path:
+        yield path
+
+
+def set_keyring_backend(backend: KeyringBackend) -> None:
+    """Clears availability cache and sets the specified keyring backend."""
+    PoetryKeyring.is_available.cache_clear()
+    keyring.set_keyring(backend)

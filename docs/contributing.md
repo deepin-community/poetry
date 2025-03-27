@@ -33,6 +33,8 @@ related reports.
 * **Check that your issue does not already exist** in the [issue tracker].
 * **Make sure your issue is really a bug, and is not a support request or question** better suited for [Discussions]
 or [Discord].
+* **Try running your commands with the** `--no-cache` **flag**.
+* **Try clearing your cache with** `poetry cache clear --all PyPI` **and rerunning your commands**.
 
 {{% note %}}
 If you find a **Closed** issue that seems like it is the same thing that you're experiencing, open a new issue and
@@ -109,7 +111,7 @@ constantly evolving, and this means that sometimes our documentation has gaps. Y
 editing the existing content to be more accessible, or creating new content such as tutorials, FAQs, etc.
 
 {{% note %}}
-Github [Discussions](https://github.com/python-poetry/poetry/discussions) and the
+GitHub [Discussions](https://github.com/python-poetry/poetry/discussions) and the
 [kind/question label](https://github.com/python-poetry/poetry/labels/kind/question) are excellent sources for FAQ
 candidates.
 {{% /note %}}
@@ -138,7 +140,7 @@ start a [Discussion][Discussions].
 Poetry is developed using Poetry. Refer to the [documentation] to install Poetry in your local environment.
 
 {{% note %}}
-Poetry's development toolchain requires Python 3.8 or newer.
+Poetry's development toolchain requires Python 3.9 or newer.
 {{% /note %}}
 
 You should first fork the Poetry repository and then clone it locally, so that you can make pull requests against the
@@ -151,6 +153,14 @@ Next, you should install Poetry's dependencies, and run the test suite to make s
 poetry install
 poetry run pytest
 ```
+
+{{% note %}}
+If you want to see the coverage stats after the tests are complete, use:
+
+```bash
+poetry run pytest --cov=src/poetry --cov-report term
+```
+{{% /note %}}
 
 When you contribute to Poetry, automated tools will be run to make sure your code is suitable to be merged. Besides
 pytest, you will need to make sure your code typechecks properly using [mypy](http://mypy-lang.org/):
@@ -179,7 +189,7 @@ poetry run pre-commit run --all-files
 * Fill out the pull request body completely and describe your changes as accurately as possible. The pull request body
 should be kept up to date as it will usually form the base for the final merge commit and the changelog entry.
 * Be sure that your pull request contains tests that cover the changed or added code. Tests are generally required for
-code be to be considered mergable, and code without passing tests will not be merged.
+code be to be considered mergeable, and code without passing tests will not be merged.
 * Ensure your pull request passes the mypy and pre-commit checks. Remember that you can run these tools locally
 instead of relying on remote CI.
 * If your changes warrant a documentation change, the pull request must also update the documentation. Make sure to
@@ -191,7 +201,7 @@ base branch. A maintainer might ask you to ensure the branch is up-to-date prior
 (especially if there have been CI changes on the base branch), and will also ask you to fix any conflicts.
 {{% /note %}}
 
-All pull requests, unless otherwise instructed, need to be first accepted into the `master` branch. Maintainers will
+All pull requests, unless otherwise instructed, need to be first accepted into the `main` branch. Maintainers will
 generally decide if any backports to other branches are required, and carry them out as needed.
 
 ### Issue triage
@@ -233,15 +243,15 @@ When trying to reproduce issues, you often want to use multiple versions of Poet
 ```sh
 pipx install --suffix @1.2.1 'poetry==1.2.1'
 pipx install --suffix @1.3.0rc1 'poetry==1.3.0rc1'
-pipx install --suffix @master 'poetry @ git+https://github.com/python-poetry/poetry'
+pipx install --suffix @main 'poetry @ git+https://github.com/python-poetry/poetry'
 pipx install --suffix @local '/path/to/local/clone/of/poetry'
 
 # now you can use any of the chosen versions of Poetry with their configured suffix, e.g.
-poetry@master --version
+poetry@main --version
 ```
 
 {{% note %}}
-Do not forget to `pipx upgrade poetry@master` before using it, to make sure you have the latest changes.
+Do not forget to `pipx upgrade poetry@main` before using it, to make sure you have the latest changes.
 {{% /note %}}
 
 {{% note %}}

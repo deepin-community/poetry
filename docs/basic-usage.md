@@ -38,33 +38,53 @@ The `pyproject.toml` file is what is the most important here. This will orchestr
 your project and its dependencies. For now, it looks like this:
 
 ```toml
-[tool.poetry]
+[project]
 name = "poetry-demo"
 version = "0.1.0"
 description = ""
-authors = ["Sébastien Eustace <sebastien@eustace.io>"]
+authors = [
+    {name = "Sébastien Eustace", email = "sebastien@eustace.io"}
+]
 readme = "README.md"
-packages = [{include = "poetry_demo"}]
-
-[tool.poetry.dependencies]
-python = "^3.7"
-
+requires-python = ">=3.9"
+dependencies = [
+]
 
 [build-system]
-requires = ["poetry-core"]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
 ```
 
-Poetry assumes your package contains a package with the same name as `tool.poetry.name` located in the root of your
+Poetry assumes your package contains a package with the same name as `project.name` located in the root of your
 project. If this is not the case, populate [`tool.poetry.packages`]({{< relref "pyproject#packages" >}}) to specify
 your packages and their locations.
 
-Similarly, the traditional `MANIFEST.in` file is replaced by the `tool.poetry.readme`, `tool.poetry.include`, and
+Similarly, the traditional `MANIFEST.in` file is replaced by the `project.readme`, `tool.poetry.include`, and
 `tool.poetry.exclude` sections. `tool.poetry.exclude` is additionally implicitly populated by your `.gitignore`. For
 full documentation on the project format, see the [pyproject section]({{< relref "pyproject" >}}) of the documentation.
 
+### Setting a Python Version
+
+{{% note %}}
+Unlike with other packages, Poetry will not automatically install a python interpreter for you.
+If you want to run Python files in your package like a script or application, you must _bring your own_ python interpreter to run them.
+{{% /note %}}
+
 Poetry will require you to explicitly specify what versions of Python you intend to support, and its universal locking
 will guarantee that your project is installable (and all dependencies claim support for) all supported Python versions.
+Again, it's important to remember that -- unlike other dependencies -- setting a Python version is merely specifying which versions of Python you intend to support.
+
+For example, in this `pyproject.toml` file:
+
+```toml
+[project]
+requires-python = ">=3.9"
+```
+
+we are allowing any version of Python 3 that is greater or equal than `3.9.0`.
+
+When you run `poetry install`, you must have access to some version of a Python interpreter that satisfies this constraint available on your system.
+Poetry will not install a Python interpreter for you.
 
 ### Initialising a pre-existing project
 
@@ -76,13 +96,39 @@ cd pre-existing-project
 poetry init
 ```
 
-### Specifying dependencies
+### Operating modes
 
-If you want to add dependencies to your project, you can specify them in the `tool.poetry.dependencies` section.
+Poetry can be operated in two different modes. The default mode is the **package mode**, which is the right mode
+if you want to package your project into an sdist or a wheel and perhaps publish it to a package index.
+In this mode, some metadata such as `name` and `version`, which are required for packaging, are mandatory.
+Further, the project itself will be installed in editable mode when running `poetry install`.
+
+If you want to use Poetry only for dependency management but not for packaging, you can use the **non-package mode**:
 
 ```toml
-[tool.poetry.dependencies]
-pendulum = "^2.1"
+[tool.poetry]
+package-mode = false
+```
+
+In this mode, metadata such as `name` and `version` are optional.
+Therefore, it is not possible to build a distribution or publish the project to a package index.
+Further, when running `poetry install`, Poetry does not try to install the project itself,
+but only its dependencies (same as `poetry install --no-root`).
+
+{{% note %}}
+In the [pyproject section]({{< relref "pyproject" >}}) you can see which fields are required in package mode.
+{{% /note %}}
+
+### Specifying dependencies
+If you want to add dependencies to your project, you can specify them in the
+`project` section.
+
+```toml
+[project]
+# ...
+dependencies = [
+    "pendulum (>=2.1,<3.0)"
+]
 ```
 
 As you can see, it takes a mapping of **package names** and **version constraints**.
@@ -128,48 +174,29 @@ any Poetry commands that expect to manipulate an environment.
 To run your script simply use `poetry run python your_script.py`.
 Likewise if you have command line tools such as `pytest` or `black` you can run them using `poetry run pytest`.
 
-### Activating the virtual environment
-
-The easiest way to activate the virtual environment is to create a nested shell with `poetry shell`.
-
-To deactivate the virtual environment and exit this new shell type `exit`.
-To deactivate the virtual environment without leaving the shell use `deactivate`.
-
 {{% note %}}
-**Why a nested shell?**
+If managing your own virtual environment externally, you do not need to use `poetry run` since
+you will, presumably, already have activated that virtual environment and made available the correct python instance.
+For example, these commands should output the same python path:
 
-Child processes inherit their environment from their parents, but do not share
-them. As such, any modifications made by a child process is not persisted after
-the child process exits. A Python application (Poetry), being a child process,
-cannot modify the environment of the shell that it has been called from such
-that an activated virtual environment remains active after the Poetry command
-has completed execution.
+```shell
+conda activate your_env_name
+which python
+poetry run which python
+poetry env activate
+which python
+```
 
-Therefore, Poetry has to create a sub-shell with the virtual environment activated
-in order for the subsequent commands to run from within the virtual environment.
 {{% /note %}}
 
-If you'd like to prevent `poetry shell` from modifying your shell prompt on virtual environment activation, you should
-set `VIRTUAL_ENV_DISABLE_PROMPT=1` as an environment variable before running the command.
+### Activating the virtual environment
 
-Alternatively, to avoid creating a new shell, you can manually activate the
-virtual environment by running `source {path_to_venv}/bin/activate` (`{path_to_venv}\Scripts\activate.ps1` in PowerShell).
-To get the path to your virtual environment run `poetry env info --path`.
-You can also combine these into a one-liner, such as `source $(poetry env info --path)/bin/activate`
-(`& ((poetry env info --path) + "\Scripts\activate.ps1")` in Powershell).
-
-To deactivate this virtual environment simply use `deactivate`.
-
-|                   | POSIX Shell                                     | Windows (PowerShell)                                     | Exit/Deactivate |
-|-------------------| ----------------------------------------------- |----------------------------------------------------------| --------------- |
-| Sub-shell         | `poetry shell`                                  | `poetry shell`                                           | `exit`          |
-| Manual Activation | `source {path_to_venv}/bin/activate`            | `{path_to_venv}\Scripts\activate.ps1`                    | `deactivate`    |
-| One-liner         | `source $(poetry env info --path)/bin/activate` | `& ((poetry env info --path) + "\Scripts\activate.ps1")` | `deactivate`    |
+See [Activating the virtual environment]({{< relref "managing-environments#activating-the-environment" >}}).
 
 ## Version constraints
 
-In our example, we are requesting the `pendulum` package with the version constraint `^2.1`.
-This means any version greater or equal to 2.1.0 and less than 3.0.0 (`>=2.1.0 <3.0.0`).
+In our example, we are requesting the `pendulum` package with the version constraint `>=2.1.0 <3.0.0`.
+This means any version greater or equal to 2.1.0 and less than 3.0.0.
 
 Please read [Dependency specification]({{< relref "dependency-specification" >}} "Dependency specification documentation")
 for more in-depth information on versions, how versions relate to each other, and on the different ways you can specify
@@ -236,7 +263,6 @@ the dependencies installed are still working even if your dependencies released 
 
 {{% warning %}} If you have added the recommended [`[build-system]`]({{< relref "pyproject#poetry-and-pep-517" >}}) section to your project's pyproject.toml then you _can_ successfully install your project and its dependencies into a virtual environment using a command like `pip install -e .`. However, pip will not use the lock file to determine dependency versions as the poetry-core build system is intended for library developers (see next section).
 {{% /warning %}}
-
 
 #### As a library developer
 

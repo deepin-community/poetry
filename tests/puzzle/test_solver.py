@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import re
+import shutil
+import sys
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 from typing import Any
+from typing import Literal
 
 import pytest
 
 from cleo.io.buffered_io import BufferedIO
-from cleo.io.null_io import NullIO
 from packaging.utils import canonicalize_name
 from poetry.core.packages.dependency import Dependency
+from poetry.core.packages.dependency_group import MAIN_GROUP
+from poetry.core.packages.dependency_group import DependencyGroup
 from poetry.core.packages.package import Package
-from poetry.core.packages.project_package import ProjectPackage
 from poetry.core.packages.vcs_dependency import VCSDependency
 from poetry.core.version.markers import parse_marker
 
@@ -29,21 +33,22 @@ from poetry.utils.env import MockEnv
 from tests.helpers import MOCK_DEFAULT_GIT_REVISION
 from tests.helpers import get_dependency
 from tests.helpers import get_package
-from tests.repositories.test_legacy_repository import (
-    MockRepository as MockLegacyRepository,
-)
-from tests.repositories.test_pypi_repository import MockRepository as MockPyPIRepository
 
 
 if TYPE_CHECKING:
     import httpretty
 
+    from cleo.io.null_io import NullIO
+    from poetry.core.packages.project_package import ProjectPackage
     from pytest_mock import MockerFixture
 
     from poetry.installation.operations.operation import Operation
     from poetry.puzzle.provider import Provider
     from poetry.puzzle.transaction import Transaction
+    from poetry.repositories.legacy_repository import LegacyRepository
+    from poetry.repositories.pypi_repository import PyPiRepository
     from tests.types import FixtureDirGetter
+    from tests.types import PackageFactory
 
 DEFAULT_SOURCE_REF = (
     VCSDependency("poetry", "git", "git@github.com:python-poetry/poetry.git").branch
@@ -53,32 +58,7 @@ DEFAULT_SOURCE_REF = (
 
 def set_package_python_versions(provider: Provider, python_versions: str) -> None:
     provider._package.python_versions = python_versions
-    provider._python_constraint = provider._package.python_constraint
-
-
-@pytest.fixture()
-def io() -> NullIO:
-    return NullIO()
-
-
-@pytest.fixture()
-def package() -> ProjectPackage:
-    return ProjectPackage("root", "1.0")
-
-
-@pytest.fixture()
-def repo() -> Repository:
-    return Repository("repo")
-
-
-@pytest.fixture()
-def pool(repo: Repository) -> RepositoryPool:
-    return RepositoryPool([repo])
-
-
-@pytest.fixture()
-def solver(package: ProjectPackage, pool: RepositoryPool, io: NullIO) -> Solver:
-    return Solver(package, pool, [], [], io)
+    provider._package_python_constraint = provider._package.python_constraint
 
 
 def check_solver_result(
@@ -163,7 +143,7 @@ def test_install_non_existing_package_fail(
         solver.solve()
 
 
-def test_install_unpublished_package_does_not_fail(
+def test_install_unpublished_package_fails(
     package: ProjectPackage, repo: Repository, pool: RepositoryPool, io: NullIO
 ) -> None:
     package.add_dependency(Factory.create_dependency("B", "1"))
@@ -174,20 +154,10 @@ def test_install_unpublished_package_does_not_fail(
 
     repo.add_package(package_a)
 
+    # Even though B is installed, it is unpublished and cannot be used during solving.
     solver = Solver(package, pool, [package_b], [], io)
-    transaction = solver.solve()
-
-    check_solver_result(
-        transaction,
-        [
-            {"job": "install", "package": package_a},
-            {
-                "job": "install",
-                "package": package_b,
-                "skipped": True,  # already installed
-            },
-        ],
-    )
+    with pytest.raises(SolverProblemError):
+        solver.solve()
 
 
 def test_solver_with_deps(
@@ -451,7 +421,7 @@ def test_solver_solves_optional_and_compatible_packages(
     solver: Solver, repo: Repository, package: ProjectPackage
 ) -> None:
     set_package_python_versions(solver.provider, "~3.4")
-    package.extras[canonicalize_name("foo")] = [get_dependency("B")]
+    package.extras = {canonicalize_name("foo"): [get_dependency("B")]}
     package.add_dependency(
         Factory.create_dependency("A", {"version": "*", "python": "^3.4"})
     )
@@ -545,6 +515,153 @@ def test_solver_returns_extras_if_requested(
     assert ops[0].package.marker.is_any()
 
 
+@pytest.mark.parametrize("num_groups", [0, 1, 2])
+def test_solver_returns_extras_if_requested_in_multiple_groups(
+    solver: Solver, repo: Repository, package: ProjectPackage, num_groups: int
+) -> None:
+    package.add_dependency(Factory.create_dependency("A", "*"))
+    package.add_dependency(Factory.create_dependency("B", "*"))
+    if num_groups:
+        package.add_dependency(
+            Factory.create_dependency(
+                "B",
+                {"version": "*", "extras": ["foo"]},
+                groups=[f"group{i}" for i in range(num_groups)],
+            )
+        )
+
+    package_a = get_package("A", "1.0")
+    package_b = get_package("B", "1.0")
+    package_c = get_package("C", "1.0")
+
+    dep = get_dependency("C", "^1.0", optional=True)
+    dep.marker = parse_marker("extra == 'foo'")
+    package_b.extras = {canonicalize_name("foo"): [dep]}
+    package_b.add_dependency(dep)
+
+    repo.add_package(package_a)
+    repo.add_package(package_b)
+    repo.add_package(package_c)
+
+    transaction = solver.solve()
+
+    expected = [
+        {"job": "install", "package": package_a},
+        {"job": "install", "package": package_b},
+    ]
+    if num_groups:
+        expected = [{"job": "install", "package": package_c}, *expected]
+
+    ops = check_solver_result(transaction, expected)
+
+    assert ops[-1].package.marker.is_any()
+    assert ops[0].package.marker.is_any()
+
+
+@pytest.mark.parametrize(
+    ("enabled_extras", "expected_packages"),
+    [
+        ([], ["a"]),
+        (["all"], ["download-package", "install-package", "a"]),
+        (["nested"], ["download-package", "install-package", "a"]),
+        (["install", "download"], ["download-package", "install-package", "a"]),
+        (["install"], ["install-package", "a"]),
+        (["download"], ["download-package", "a"]),
+        # test to ensure target extra dependencies with markers are respected
+        (["py"], ["py310-package", "a"]),
+    ],
+)
+@pytest.mark.parametrize("top_level_dependency", [True, False])
+def test_solver_resolves_self_referential_extras(
+    enabled_extras: list[str],
+    expected_packages: list[Literal["a", "b", "download-package", "install-package"]],
+    top_level_dependency: bool,
+    solver: Solver,
+    repo: Repository,
+    package: ProjectPackage,
+    create_package: PackageFactory,
+) -> None:
+    dependency = (
+        create_package(
+            "A",
+            str(package.version),
+            extras={
+                "download": ["download-package"],
+                "install": ["install-package"],
+                "py38": ["py38-package ; python_version == '3.8'"],
+                "py310": ["py310-package ; python_version > '3.8'"],
+                "all": ["a[download,install]"],
+                "py": ["a[py38,py310]"],
+                "nested": ["a[all]"],
+            },
+        )
+        .to_dependency()
+        .with_features(enabled_extras)
+    )
+
+    if not top_level_dependency:
+        dependency = create_package(
+            "B", "1.0", dependencies=[dependency]
+        ).to_dependency()
+        # we do not use append() here to avoid flaky tests
+        expected_packages = [*expected_packages, "b"]
+
+    package.add_dependency(dependency)
+
+    # Solving the dependency graph
+    with solver.use_environment(MockEnv((3, 10, 0))):
+        transaction = solver.solve()
+
+    # Verifying the results
+    check_solver_result(
+        transaction,
+        [
+            {"job": "install", "package": repo.package(name, package.version)}
+            for name in expected_packages
+        ],
+    )
+
+
+def test_solver_resolves_self_referential_extras_markers(
+    solver: Solver,
+    repo: Repository,
+    package: ProjectPackage,
+    create_package: PackageFactory,
+) -> None:
+    package.python_versions = ".".join([str(i) for i in sys.version_info[:3]])
+    package.add_dependency(
+        Factory.create_dependency("A", {"version": "*", "extras": ["all"]})
+    )
+
+    create_package(
+        "A",
+        str(package.version),
+        extras={
+            "download": ["download-package"],
+            "install": ["install-package"],
+            "all": ["a[download,install] ; python_version < '3.9'"],
+        },
+    )
+
+    # Solving the dependency graph
+    with solver.use_environment(MockEnv((3, 10, 0))):
+        transaction = solver.solve()
+
+    # Verifying the results
+    check_solver_result(
+        transaction,
+        [
+            {"job": "install", "package": repo.package(name, package.version)}
+            # FIXME: At the time of writing this test case, the markers from self-ref extras are not
+            #  correctly propagated into the dependency specs. For example, given this case,
+            #  the package "install-package" should have a final marker of
+            #  "extra == 'install' or extra == 'all' and python_version < '3.9'".
+            #  Once fixed, this should only install package "a".
+            for name in ["download-package", "install-package", "a"]
+        ],
+    )
+
+
 @pytest.mark.parametrize("enabled_extra", ["one", "two", None])
 def test_solver_returns_extras_only_requested(
     solver: Solver,
@@ -565,11 +682,11 @@ def test_solver_returns_extras_only_requested(
     package_c20 = get_package("C", "2.0")
 
     dep10 = get_dependency("C", "1.0", optional=True)
-    dep10._in_extras.append(canonicalize_name("one"))
+    dep10._in_extras = [canonicalize_name("one")]
     dep10.marker = parse_marker("extra == 'one'")
 
     dep20 = get_dependency("C", "2.0", optional=True)
-    dep20._in_extras.append(canonicalize_name("two"))
+    dep20._in_extras = [canonicalize_name("two")]
     dep20.marker = parse_marker("extra == 'two'")
 
     package_b.extras = {
@@ -624,8 +741,7 @@ def test_solver_returns_extras_when_multiple_extras_use_same_dependency(
     package_c = get_package("C", "1.0")
 
     dep = get_dependency("C", "*", optional=True)
-    dep._in_extras.append(canonicalize_name("one"))
-    dep._in_extras.append(canonicalize_name("two"))
+    dep._in_extras = [canonicalize_name("one"), canonicalize_name("two")]
 
     package_b.extras = {
         canonicalize_name("one"): [dep],
@@ -662,6 +778,63 @@ def test_solver_returns_extras_when_multiple_extras_use_same_dependency(
     assert ops[0].package.marker.is_any()
 
 
+def test_solver_locks_all_extras_when_multiple_extras_require_same_dependency(
+    solver: Solver,
+    repo: Repository,
+    package: ProjectPackage,
+) -> None:
+    """
+    - root depends on A[extra-b1] and C
+    - C depends on A[extra-b2]
+    - B is required by both extras
+    -> the locked dependency A on B must have both extra markers
+    """
+    package_a = get_package("A", "1.0")
+    package_b = get_package("B", "1.0")
+    package_c = get_package("C", "1.0")
+
+    dep_b1 = get_dependency("B", "*", optional=True)
+    dep_b1.marker = parse_marker("extra == 'extra-b1'")
+
+    dep_b2 = get_dependency("B", "*", optional=True)
+    dep_b2.marker = parse_marker("extra == 'extra-b2'")
+
+    package_a.extras = {
+        canonicalize_name("extra-b1"): [dep_b1],
+        canonicalize_name("extra-b2"): [dep_b2],
+    }
+    package_a.add_dependency(dep_b1)
+    package_a.add_dependency(dep_b2)
+
+    package.add_dependency(
+        get_dependency("A", {"version": "*", "extras": ["extra-b1"]})
+    )
+    package.add_dependency(get_dependency("C", "*"))
+    package_c.add_dependency(
+        get_dependency("A", {"version": "*", "extras": ["extra-b2"]})
+    )
+
+    repo.add_package(package_a)
+    repo.add_package(package_b)
+    repo.add_package(package_c)
+
+    transaction = solver.solve()
+
+    expected = [
+        {"job": "install", "package": package_b},
+        {"job": "install", "package": package_a},
+        {"job": "install", "package": package_c},
+    ]
+
+    ops = check_solver_result(transaction, expected)
+    locked_a_requires = ops[1].package.requires
+    assert len(locked_a_requires) == 2
+    assert {str(r.marker) for r in locked_a_requires} == {
+        'extra == "extra-b1"',
+        'extra == "extra-b2"',
+    }
+
+
 @pytest.mark.parametrize("enabled_extra", ["one", "two", None])
 def test_solver_returns_extras_only_requested_nested(
     solver: Solver,
@@ -677,11 +850,11 @@ def test_solver_returns_extras_only_requested_nested(
     package_c20 = get_package("C", "2.0")
 
     dep10 = get_dependency("C", "1.0", optional=True)
-    dep10._in_extras.append(canonicalize_name("one"))
+    dep10._in_extras = [canonicalize_name("one")]
     dep10.marker = parse_marker("extra == 'one'")
 
     dep20 = get_dependency("C", "2.0", optional=True)
-    dep20._in_extras.append(canonicalize_name("two"))
+    dep20._in_extras = [canonicalize_name("two")]
     dep20.marker = parse_marker("extra == 'two'")
 
     package_b.extras = {
@@ -787,7 +960,7 @@ def test_solver_merge_extras_into_base_package_multiple_repos_fixes_5727(
     package_b = Package("B", "1.0", source_type="legacy")
     package_b.add_dependency(package_a.with_features(["foo"]).to_dependency())
 
-    package_a = Package("A", "1.0", source_type="legacy")
+    package_a = Package("A", "1.0", source_type="legacy", source_reference="legacy")
     package_a.extras = {canonicalize_name("foo"): []}
 
     repo = Repository("legacy")
@@ -1077,7 +1250,7 @@ def test_solver_with_dependency_in_both_main_and_dev_dependencies(
     )
 
     package_a = get_package("A", "1.0")
-    package_a.extras[canonicalize_name("foo")] = [get_dependency("C")]
+    package_a.extras = {canonicalize_name("foo"): [get_dependency("C")]}
     package_a.add_dependency(
         Factory.create_dependency("C", {"version": "^1.0", "optional": True})
     )
@@ -1108,7 +1281,7 @@ def test_solver_with_dependency_in_both_main_and_dev_dependencies(
     )
 
 
-def test_solver_with_dependency_in_both_main_and_dev_dependencies_with_one_more_dependent(  # noqa: E501
+def test_solver_with_dependency_in_both_main_and_dev_dependencies_with_one_more_dependent(
     solver: Solver, repo: Repository, package: ProjectPackage
 ) -> None:
     package.add_dependency(Factory.create_dependency("A", "*"))
@@ -1120,7 +1293,7 @@ def test_solver_with_dependency_in_both_main_and_dev_dependencies_with_one_more_
     )
 
     package_a = get_package("A", "1.0")
-    package_a.extras[canonicalize_name("foo")] = [get_dependency("C")]
+    package_a.extras = {canonicalize_name("foo"): [get_dependency("C")]}
     package_a.add_dependency(
         Factory.create_dependency("C", {"version": "^1.0", "optional": True})
     )
@@ -1793,7 +1966,7 @@ def test_solver_duplicate_dependencies_ignore_overrides_with_empty_marker_inters
     solver: Solver, repo: Repository, package: ProjectPackage
 ) -> None:
     """
-    Empty intersection between top level dependency and transient dependency.
+    Empty intersection between top level dependency and transitive dependency.
     """
     package.add_dependency(Factory.create_dependency("A", {"version": "1.0"}))
     package.add_dependency(
@@ -1966,91 +2139,49 @@ def test_solver_duplicate_dependencies_with_overlapping_markers_complex(
         ],
     )
     opencv_requires = {dep.to_pep_508() for dep in ops[-1].package.requires}
-    expectation = (
-        {  # concise solution, but too expensive
-            (
-                "numpy (>=1.21.2) ;"
-                ' platform_system == "Darwin" and platform_machine == "arm64"'
-                ' and python_version >= "3.6" or python_version >= "3.10"'
-            ),
-            (
-                'numpy (>=1.19.3) ; python_version >= "3.9" and python_version < "3.10"'
-                ' and platform_system != "Darwin" or platform_system == "Linux"'
-                ' and platform_machine == "aarch64" and python_version < "3.10"'
-                ' and python_version >= "3.6" or python_version >= "3.9"'
-                ' and python_version < "3.10" and platform_machine != "arm64"'
-            ),
-            (
-                'numpy (>=1.17.3) ; python_version >= "3.8" and python_version < "3.9"'
-                ' and (platform_system != "Darwin" or platform_machine != "arm64")'
-                ' and (platform_system != "Linux" or platform_machine != "aarch64")'
-            ),
-            (
-                'numpy (>=1.14.5) ; python_version >= "3.7" and python_version < "3.8"'
-                ' and (platform_system != "Darwin" or platform_machine != "arm64")'
-                ' and (platform_system != "Linux" or platform_machine != "aarch64")'
-            ),
-            (
-                'numpy (>=1.13.3) ; python_version < "3.7"'
-                ' and (python_version < "3.6" or platform_system != "Darwin"'
-                ' or platform_machine != "arm64") and (python_version < "3.6"'
-                ' or platform_system != "Linux" or platform_machine != "aarch64")'
-            ),
-        },
-        {  # current solution
-            (
-                "numpy (>=1.21.2) ;"
-                ' python_version >= "3.6" and platform_system == "Darwin"'
-                ' and platform_machine == "arm64" or python_version >= "3.10"'
-            ),
-            (
-                'numpy (>=1.19.3) ; python_version >= "3.9" and python_version < "3.10"'
-                ' and platform_system != "Darwin" or python_version >= "3.9"'
-                ' and python_version < "3.10" and platform_machine != "arm64"'
-                ' or platform_system == "Linux" and python_version < "3.10"'
-                ' and platform_machine == "aarch64" and python_version >= "3.6"'
-            ),
-            (
-                'numpy (>=1.17.3) ; python_version < "3.9"'
-                ' and (platform_system != "Darwin" and platform_system != "Linux")'
-                ' and python_version >= "3.8" or python_version < "3.9"'
-                ' and platform_system != "Darwin" and python_version >= "3.8"'
-                ' and platform_machine != "aarch64" or python_version < "3.9"'
-                ' and platform_machine != "arm64" and python_version >= "3.8"'
-                ' and platform_system != "Linux" or python_version < "3.9"'
-                ' and (platform_machine != "arm64" and platform_machine != "aarch64")'
-                ' and python_version >= "3.8"'
-            ),
-            (
-                'numpy (>=1.14.5) ; python_version < "3.8"'
-                ' and (platform_system != "Darwin" and platform_system != "Linux")'
-                ' and python_version >= "3.7" or python_version < "3.8"'
-                ' and platform_system != "Darwin" and python_version >= "3.7"'
-                ' and platform_machine != "aarch64" or python_version < "3.8"'
-                ' and platform_machine != "arm64" and python_version >= "3.7"'
-                ' and platform_system != "Linux" or python_version < "3.8"'
-                ' and (platform_machine != "arm64" and platform_machine != "aarch64")'
-                ' and python_version >= "3.7"'
-            ),
-            (
-                'numpy (>=1.13.3) ; python_version < "3.6" or python_version < "3.7"'
-                ' and (platform_system != "Darwin" and platform_system != "Linux")'
-                ' or python_version < "3.7" and platform_system != "Darwin"'
-                ' and platform_machine != "aarch64" or python_version < "3.7"'
-                ' and platform_machine != "arm64" and platform_system != "Linux"'
-                ' or python_version < "3.7" and (platform_machine != "arm64"'
-                ' and platform_machine != "aarch64")'
-            ),
-        },
-    )
-    assert opencv_requires in expectation
+
+    assert opencv_requires == {
+        (
+            "numpy (>=1.21.2) ;"
+            ' python_version >= "3.6" and platform_system == "Darwin"'
+            ' and platform_machine == "arm64" or python_version >= "3.10"'
+        ),
+        (
+            'numpy (>=1.19.3) ; platform_system == "Linux"'
+            ' and platform_machine == "aarch64" and python_version < "3.10"'
+            ' and python_version >= "3.6" or python_version == "3.9"'
+            ' and platform_system != "Darwin" or python_version == "3.9"'
+            ' and platform_machine != "arm64"'
+        ),
+        (
+            'numpy (>=1.17.3) ; python_version == "3.8"'
+            ' and (platform_system != "Darwin" or platform_machine != "arm64")'
+            ' and (platform_system != "Linux" or platform_machine != "aarch64")'
+        ),
+        (
+            'numpy (>=1.14.5) ; python_version == "3.7"'
+            ' and (platform_system != "Darwin" or platform_machine != "arm64")'
+            ' and (platform_system != "Linux" or platform_machine != "aarch64")'
+        ),
+        (
+            'numpy (>=1.13.3) ; python_version < "3.7"'
+            ' and (python_version < "3.6" or platform_system != "Darwin"'
+            ' or platform_machine != "arm64") and (python_version < "3.6"'
+            ' or platform_system != "Linux" or platform_machine != "aarch64")'
+        ),
+    }
 
 
 def test_duplicate_path_dependencies(
-    solver: Solver, package: ProjectPackage, fixture_dir: FixtureDirGetter
+    solver: Solver,
+    package: ProjectPackage,
+    fixture_dir: FixtureDirGetter,
+    tmp_path: Path,
 ) -> None:
     set_package_python_versions(solver.provider, "^3.7")
-    project_dir = fixture_dir("with_conditional_path_deps")
+    project_dir = shutil.copytree(
+        fixture_dir("with_conditional_path_deps"), tmp_path / "project"
+    )
 
     path1 = (project_dir / "demo_one").as_posix()
     demo1 = Package("demo", "1.2.3", source_type="directory", source_url=path1)
@@ -2080,10 +2211,15 @@ def test_duplicate_path_dependencies(
 
 
 def test_duplicate_path_dependencies_same_path(
-    solver: Solver, package: ProjectPackage, fixture_dir: FixtureDirGetter
+    solver: Solver,
+    package: ProjectPackage,
+    fixture_dir: FixtureDirGetter,
+    tmp_path: Path,
 ) -> None:
     set_package_python_versions(solver.provider, "^3.7")
-    project_dir = fixture_dir("with_conditional_path_deps")
+    project_dir = shutil.copytree(
+        fixture_dir("with_conditional_path_deps"), tmp_path / "project"
+    )
 
     path1 = (project_dir / "demo_one").as_posix()
     demo1 = Package("demo", "1.2.3", source_type="directory", source_url=path1)
@@ -2258,7 +2394,7 @@ def test_solver_can_resolve_git_dependencies_with_ref(
     assert op.package.source_resolved_reference.startswith("9cf87a2")
 
 
-def test_solver_does_not_trigger_conflict_for_python_constraint_if_python_requirement_is_compatible(  # noqa: E501
+def test_solver_does_not_trigger_conflict_for_python_constraint_if_python_requirement_is_compatible(
     solver: Solver, repo: Repository, package: ProjectPackage
 ) -> None:
     set_package_python_versions(solver.provider, "~2.7 || ^3.4")
@@ -2276,7 +2412,7 @@ def test_solver_does_not_trigger_conflict_for_python_constraint_if_python_requir
     check_solver_result(transaction, [{"job": "install", "package": package_a}])
 
 
-def test_solver_does_not_trigger_conflict_for_python_constraint_if_python_requirement_is_compatible_multiple(  # noqa: E501
+def test_solver_does_not_trigger_conflict_for_python_constraint_if_python_requirement_is_compatible_multiple(
     solver: Solver, repo: Repository, package: ProjectPackage
 ) -> None:
     set_package_python_versions(solver.provider, "~2.7 || ^3.4")
@@ -2308,7 +2444,7 @@ def test_solver_does_not_trigger_conflict_for_python_constraint_if_python_requir
     )
 
 
-def test_solver_triggers_conflict_for_dependency_python_not_fully_compatible_with_package_python(  # noqa: E501
+def test_solver_triggers_conflict_for_dependency_python_not_fully_compatible_with_package_python(
     solver: Solver, repo: Repository, package: ProjectPackage
 ) -> None:
     set_package_python_versions(solver.provider, "~2.7 || ^3.4")
@@ -2325,7 +2461,7 @@ def test_solver_triggers_conflict_for_dependency_python_not_fully_compatible_wit
         solver.solve()
 
 
-def test_solver_finds_compatible_package_for_dependency_python_not_fully_compatible_with_package_python(  # noqa: E501
+def test_solver_finds_compatible_package_for_dependency_python_not_fully_compatible_with_package_python(
     solver: Solver, repo: Repository, package: ProjectPackage
 ) -> None:
     set_package_python_versions(solver.provider, "~2.7 || ^3.4")
@@ -2347,7 +2483,7 @@ def test_solver_finds_compatible_package_for_dependency_python_not_fully_compati
     check_solver_result(transaction, [{"job": "install", "package": package_a100}])
 
 
-def test_solver_does_not_trigger_new_resolution_on_duplicate_dependencies_if_only_extras(  # noqa: E501
+def test_solver_does_not_trigger_new_resolution_on_duplicate_dependencies_if_only_extras(
     solver: Solver, repo: Repository, package: ProjectPackage
 ) -> None:
     dep1 = Dependency.create_from_pep_508('B (>=1.0); extra == "foo"')
@@ -2648,11 +2784,16 @@ def test_solver_can_resolve_directory_dependencies(
     repo: Repository,
     package: ProjectPackage,
     fixture_dir: FixtureDirGetter,
+    tmp_path: Path,
 ) -> None:
     pendulum = get_package("pendulum", "2.0.3")
     repo.add_package(pendulum)
 
-    path = (fixture_dir("git") / "github.com" / "demo" / "demo").as_posix()
+    project_dir = shutil.copytree(
+        fixture_dir("git") / "github.com" / "demo" / "demo",
+        tmp_path / "project",
+    )
+    path = project_dir.as_posix()
 
     package.add_dependency(Factory.create_dependency("demo", {"path": path}))
 
@@ -2733,13 +2874,18 @@ def test_solver_can_resolve_directory_dependencies_with_extras(
     repo: Repository,
     package: ProjectPackage,
     fixture_dir: FixtureDirGetter,
+    tmp_path: Path,
 ) -> None:
     pendulum = get_package("pendulum", "2.0.3")
     cleo = get_package("cleo", "1.0.0")
     repo.add_package(pendulum)
     repo.add_package(cleo)
 
-    path = (fixture_dir("git") / "github.com" / "demo" / "demo").as_posix()
+    project_dir = shutil.copytree(
+        fixture_dir("git") / "github.com" / "demo" / "demo",
+        tmp_path / "project",
+    )
+    path = project_dir.as_posix()
 
     package.add_dependency(
         Factory.create_dependency("demo", {"path": path, "extras": ["foo"]})
@@ -2771,11 +2917,15 @@ def test_solver_can_resolve_sdist_dependencies(
     repo: Repository,
     package: ProjectPackage,
     fixture_dir: FixtureDirGetter,
+    tmp_path: Path,
 ) -> None:
     pendulum = get_package("pendulum", "2.0.3")
     repo.add_package(pendulum)
 
-    path = (fixture_dir("distributions") / "demo-0.1.0.tar.gz").as_posix()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    path = shutil.copy(fixture_dir("distributions") / "demo-0.1.0.tar.gz", project_dir)
+    path = Path(path).as_posix()
 
     package.add_dependency(Factory.create_dependency("demo", {"path": path}))
 
@@ -2801,13 +2951,17 @@ def test_solver_can_resolve_sdist_dependencies_with_extras(
     repo: Repository,
     package: ProjectPackage,
     fixture_dir: FixtureDirGetter,
+    tmp_path: Path,
 ) -> None:
     pendulum = get_package("pendulum", "2.0.3")
     cleo = get_package("cleo", "1.0.0")
     repo.add_package(pendulum)
     repo.add_package(cleo)
 
-    path = (fixture_dir("distributions") / "demo-0.1.0.tar.gz").as_posix()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    path = shutil.copy(fixture_dir("distributions") / "demo-0.1.0.tar.gz", project_dir)
+    path = Path(path).as_posix()
 
     package.add_dependency(
         Factory.create_dependency("demo", {"path": path, "extras": ["foo"]})
@@ -2839,11 +2993,17 @@ def test_solver_can_resolve_wheel_dependencies(
     repo: Repository,
     package: ProjectPackage,
     fixture_dir: FixtureDirGetter,
+    tmp_path: Path,
 ) -> None:
     pendulum = get_package("pendulum", "2.0.3")
     repo.add_package(pendulum)
 
-    path = (fixture_dir("distributions") / "demo-0.1.0-py2.py3-none-any.whl").as_posix()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    path = shutil.copy(
+        fixture_dir("distributions") / "demo-0.1.0-py2.py3-none-any.whl", project_dir
+    )
+    path = Path(path).as_posix()
 
     package.add_dependency(Factory.create_dependency("demo", {"path": path}))
 
@@ -2869,13 +3029,19 @@ def test_solver_can_resolve_wheel_dependencies_with_extras(
     repo: Repository,
     package: ProjectPackage,
     fixture_dir: FixtureDirGetter,
+    tmp_path: Path,
 ) -> None:
     pendulum = get_package("pendulum", "2.0.3")
     cleo = get_package("cleo", "1.0.0")
     repo.add_package(pendulum)
     repo.add_package(cleo)
 
-    path = (fixture_dir("distributions") / "demo-0.1.0-py2.py3-none-any.whl").as_posix()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    path = shutil.copy(
+        fixture_dir("distributions") / "demo-0.1.0-py2.py3-none-any.whl", project_dir
+    )
+    path = Path(path).as_posix()
 
     package.add_dependency(
         Factory.create_dependency("demo", {"path": path, "extras": ["foo"]})
@@ -2903,9 +3069,9 @@ def test_solver_can_resolve_wheel_dependencies_with_extras(
 
 
 def test_solver_can_solve_with_legacy_repository_using_proper_dists(
-    package: ProjectPackage, io: NullIO
+    package: ProjectPackage, io: NullIO, legacy_repository: LegacyRepository
 ) -> None:
-    repo = MockLegacyRepository()
+    repo = legacy_repository
     pool = RepositoryPool([repo])
 
     solver = Solver(package, pool, [], [], io)
@@ -2947,10 +3113,11 @@ def test_solver_can_solve_with_legacy_repository_using_proper_dists(
 def test_solver_can_solve_with_legacy_repository_using_proper_python_compatible_dists(
     package: ProjectPackage,
     io: NullIO,
+    legacy_repository: LegacyRepository,
 ) -> None:
     package.python_versions = "^3.7"
 
-    repo = MockLegacyRepository()
+    repo = legacy_repository
     pool = RepositoryPool([repo])
 
     solver = Solver(package, pool, [], [], io)
@@ -2976,20 +3143,22 @@ def test_solver_can_solve_with_legacy_repository_using_proper_python_compatible_
     )
 
 
-def test_solver_skips_invalid_versions(package: ProjectPackage, io: NullIO) -> None:
-    package.python_versions = "^3.7"
+def test_solver_skips_invalid_versions(
+    package: ProjectPackage, io: NullIO, pypi_repository: PyPiRepository
+) -> None:
+    package.python_versions = "^3.9"
 
-    repo = MockPyPIRepository()
-    pool = RepositoryPool([repo])
+    pool = RepositoryPool([pypi_repository])
 
     solver = Solver(package, pool, [], [], io)
 
-    package.add_dependency(Factory.create_dependency("trackpy", "^0.4"))
+    package.add_dependency(Factory.create_dependency("six-unknown-version", "^1.11"))
 
     transaction = solver.solve()
 
     check_solver_result(
-        transaction, [{"job": "install", "package": get_package("trackpy", "0.4.1")}]
+        transaction,
+        [{"job": "install", "package": get_package("six-unknown-version", "1.11.0")}],
     )
 
 
@@ -3018,13 +3187,15 @@ def test_multiple_constraints_on_root(
 
 
 def test_solver_chooses_most_recent_version_amongst_repositories(
-    package: ProjectPackage, io: NullIO
+    package: ProjectPackage,
+    io: NullIO,
+    legacy_repository: LegacyRepository,
+    pypi_repository: PyPiRepository,
 ) -> None:
     package.python_versions = "^3.7"
     package.add_dependency(Factory.create_dependency("tomlkit", {"version": "^0.5"}))
 
-    repo = MockLegacyRepository()
-    pool = RepositoryPool([repo, MockPyPIRepository()])
+    pool = RepositoryPool([legacy_repository, pypi_repository])
 
     solver = Solver(package, pool, [], [], io)
 
@@ -3039,15 +3210,17 @@ def test_solver_chooses_most_recent_version_amongst_repositories(
 
 
 def test_solver_chooses_from_correct_repository_if_forced(
-    package: ProjectPackage, io: NullIO
+    package: ProjectPackage,
+    io: NullIO,
+    legacy_repository: LegacyRepository,
+    pypi_repository: PyPiRepository,
 ) -> None:
     package.python_versions = "^3.7"
     package.add_dependency(
         Factory.create_dependency("tomlkit", {"version": "^0.5", "source": "legacy"})
     )
 
-    repo = MockLegacyRepository()
-    pool = RepositoryPool([repo, MockPyPIRepository()])
+    pool = RepositoryPool([legacy_repository, pypi_repository])
 
     solver = Solver(package, pool, [], [], io)
 
@@ -3062,31 +3235,47 @@ def test_solver_chooses_from_correct_repository_if_forced(
                     "tomlkit",
                     "0.5.2",
                     source_type="legacy",
-                    source_url=repo.url,
-                    source_reference=repo.name,
+                    source_url=legacy_repository.url,
+                    source_reference=legacy_repository.name,
                 ),
             }
         ],
     )
 
-    assert ops[0].package.source_url == "http://legacy.foo.bar"
+    assert ops[0].package.source_url == legacy_repository.url
 
 
+@pytest.mark.parametrize("project_dependencies", [True, False])
 def test_solver_chooses_from_correct_repository_if_forced_and_transitive_dependency(
     package: ProjectPackage,
     io: NullIO,
+    legacy_repository: LegacyRepository,
+    pypi_repository: PyPiRepository,
+    project_dependencies: bool,
 ) -> None:
     package.python_versions = "^3.7"
-    package.add_dependency(Factory.create_dependency("foo", "^1.0"))
-    package.add_dependency(
-        Factory.create_dependency("tomlkit", {"version": "^0.5", "source": "legacy"})
-    )
+    if project_dependencies:
+        main_group = DependencyGroup(MAIN_GROUP)
+        package.add_dependency_group(main_group)
+        main_group.add_dependency(Factory.create_dependency("foo", "^1.0"))
+        main_group.add_dependency(Factory.create_dependency("tomlkit", "^0.5"))
+        main_group.add_poetry_dependency(
+            Factory.create_dependency("tomlkit", {"source": "legacy"})
+        )
+    else:
+        package.add_dependency(Factory.create_dependency("foo", "^1.0"))
+        package.add_dependency(
+            Factory.create_dependency(
+                "tomlkit", {"version": "^0.5", "source": "legacy"}
+            )
+        )
 
     repo = Repository("repo")
     foo = get_package("foo", "1.0.0")
     foo.add_dependency(Factory.create_dependency("tomlkit", "^0.5.0"))
     repo.add_package(foo)
-    pool = RepositoryPool([MockLegacyRepository(), repo, MockPyPIRepository()])
+
+    pool = RepositoryPool([legacy_repository, repo, pypi_repository])
 
     solver = Solver(package, pool, [], [], io)
 
@@ -3101,7 +3290,7 @@ def test_solver_chooses_from_correct_repository_if_forced_and_transitive_depende
                     "tomlkit",
                     "0.5.2",
                     source_type="legacy",
-                    source_url="http://legacy.foo.bar",
+                    source_url=legacy_repository.url,
                     source_reference="legacy",
                 ),
             },
@@ -3109,21 +3298,24 @@ def test_solver_chooses_from_correct_repository_if_forced_and_transitive_depende
         ],
     )
 
-    assert ops[0].package.source_url == "http://legacy.foo.bar"
+    assert ops[0].package.source_url == legacy_repository.url
 
     assert ops[1].package.source_type is None
     assert ops[1].package.source_url is None
 
 
-def test_solver_does_not_choose_from_secondary_repository_by_default(
-    package: ProjectPackage, io: NullIO
+def test_solver_does_not_choose_from_supplemental_repository_by_default(
+    package: ProjectPackage,
+    io: NullIO,
+    legacy_repository: LegacyRepository,
+    pypi_repository: PyPiRepository,
 ) -> None:
     package.python_versions = "^3.7"
     package.add_dependency(Factory.create_dependency("clikit", {"version": "^0.2.0"}))
 
     pool = RepositoryPool()
-    pool.add_repository(MockPyPIRepository(), priority=Priority.SECONDARY)
-    pool.add_repository(MockLegacyRepository())
+    pool.add_repository(pypi_repository, priority=Priority.SUPPLEMENTAL)
+    pool.add_repository(legacy_repository)
 
     solver = Solver(package, pool, [], [], io)
 
@@ -3138,7 +3330,7 @@ def test_solver_does_not_choose_from_secondary_repository_by_default(
                     "pastel",
                     "0.1.0",
                     source_type="legacy",
-                    source_url="http://legacy.foo.bar",
+                    source_url=legacy_repository.url,
                     source_reference="legacy",
                 ),
             },
@@ -3149,22 +3341,24 @@ def test_solver_does_not_choose_from_secondary_repository_by_default(
                     "clikit",
                     "0.2.4",
                     source_type="legacy",
-                    source_url="http://legacy.foo.bar",
+                    source_url=legacy_repository.url,
                     source_reference="legacy",
                 ),
             },
         ],
     )
 
-    assert ops[0].package.source_url == "http://legacy.foo.bar"
+    assert ops[0].package.source_url == legacy_repository.url
     assert ops[1].package.source_type is None
     assert ops[1].package.source_url is None
-    assert ops[2].package.source_url == "http://legacy.foo.bar"
+    assert ops[2].package.source_url == legacy_repository.url
 
 
-def test_solver_chooses_from_secondary_if_explicit(
+def test_solver_chooses_from_supplemental_if_explicit(
     package: ProjectPackage,
     io: NullIO,
+    legacy_repository: LegacyRepository,
+    pypi_repository: PyPiRepository,
 ) -> None:
     package.python_versions = "^3.7"
     package.add_dependency(
@@ -3172,8 +3366,8 @@ def test_solver_chooses_from_secondary_if_explicit(
     )
 
     pool = RepositoryPool()
-    pool.add_repository(MockPyPIRepository(), priority=Priority.SECONDARY)
-    pool.add_repository(MockLegacyRepository())
+    pool.add_repository(pypi_repository, priority=Priority.SUPPLEMENTAL)
+    pool.add_repository(legacy_repository)
 
     solver = Solver(package, pool, [], [], io)
 
@@ -3188,7 +3382,7 @@ def test_solver_chooses_from_secondary_if_explicit(
                     "pastel",
                     "0.1.0",
                     source_type="legacy",
-                    source_url="http://legacy.foo.bar",
+                    source_url=legacy_repository.url,
                     source_reference="legacy",
                 ),
             },
@@ -3197,7 +3391,7 @@ def test_solver_chooses_from_secondary_if_explicit(
         ],
     )
 
-    assert ops[0].package.source_url == "http://legacy.foo.bar"
+    assert ops[0].package.source_url == legacy_repository.url
     assert ops[1].package.source_type is None
     assert ops[1].package.source_url is None
     assert ops[2].package.source_type is None
@@ -3205,14 +3399,17 @@ def test_solver_chooses_from_secondary_if_explicit(
 
 
 def test_solver_does_not_choose_from_explicit_repository(
-    package: ProjectPackage, io: NullIO
+    package: ProjectPackage,
+    io: NullIO,
+    legacy_repository: LegacyRepository,
+    pypi_repository: PyPiRepository,
 ) -> None:
     package.python_versions = "^3.7"
     package.add_dependency(Factory.create_dependency("attrs", {"version": "^17.4.0"}))
 
     pool = RepositoryPool()
-    pool.add_repository(MockPyPIRepository(), priority=Priority.EXPLICIT)
-    pool.add_repository(MockLegacyRepository())
+    pool.add_repository(pypi_repository, priority=Priority.EXPLICIT)
+    pool.add_repository(legacy_repository)
 
     solver = Solver(package, pool, [], [], io)
 
@@ -3223,6 +3420,8 @@ def test_solver_does_not_choose_from_explicit_repository(
 def test_solver_chooses_direct_dependency_from_explicit_if_explicit(
     package: ProjectPackage,
     io: NullIO,
+    legacy_repository: LegacyRepository,
+    pypi_repository: PyPiRepository,
 ) -> None:
     package.python_versions = "^3.7"
     package.add_dependency(
@@ -3230,8 +3429,8 @@ def test_solver_chooses_direct_dependency_from_explicit_if_explicit(
     )
 
     pool = RepositoryPool()
-    pool.add_repository(MockPyPIRepository(), priority=Priority.EXPLICIT)
-    pool.add_repository(MockLegacyRepository())
+    pool.add_repository(pypi_repository, priority=Priority.EXPLICIT)
+    pool.add_repository(legacy_repository)
 
     solver = Solver(package, pool, [], [], io)
 
@@ -3248,25 +3447,300 @@ def test_solver_chooses_direct_dependency_from_explicit_if_explicit(
     assert ops[0].package.source_url is None
 
 
-def test_solver_ignores_explicit_repo_for_transient_dependencies(
+def test_solver_ignores_explicit_repo_for_transitive_dependencies(
     package: ProjectPackage,
     io: NullIO,
+    legacy_repository: LegacyRepository,
+    pypi_repository: PyPiRepository,
 ) -> None:
-    # clikit depends on pylev, which is in MockPyPIRepository (explicit) but not in
-    # MockLegacyRepository
+    # clikit depends on pylev, which is in pypi_repository (explicit) but not in
+    # legacy_repository
     package.python_versions = "^3.7"
     package.add_dependency(
         Factory.create_dependency("clikit", {"version": "^0.2.0", "source": "PyPI"})
     )
 
     pool = RepositoryPool()
-    pool.add_repository(MockPyPIRepository(), priority=Priority.EXPLICIT)
-    pool.add_repository(MockLegacyRepository())
+    pool.add_repository(pypi_repository, priority=Priority.EXPLICIT)
+    pool.add_repository(legacy_repository)
 
     solver = Solver(package, pool, [], [], io)
 
     with pytest.raises(SolverProblemError):
         solver.solve()
+
+
+@pytest.mark.parametrize(
+    ("lib_versions", "other_versions"),
+    [
+        # number of versions influences which dependency is resolved first
+        (["1.0", "2.0"], ["1.0", "1.1", "2.0"]),  # more other than lib
+        (["1.0", "1.1", "2.0"], ["1.0", "2.0"]),  # more lib than other
+    ],
+)
+def test_direct_dependency_with_extras_from_explicit_and_transitive_dependency(
+    package: ProjectPackage,
+    repo: Repository,
+    pool: RepositoryPool,
+    io: NullIO,
+    lib_versions: list[str],
+    other_versions: list[str],
+) -> None:
+    """
+    The root package depends on "lib[extra]" and "other", both with an explicit source.
+    "other" depends on "lib" (without an extra and of course without an explicit source
+    because explicit sources can only be defined in the root package).
+
+    If "other" is resolved before "lib[extra]", the solver must not try to fetch "lib"
+    from the default source but from the explicit source defined for "lib[extra]".
+    """
+    package.add_dependency(
+        Factory.create_dependency(
+            "lib", {"version": ">=1.0", "extras": ["extra"], "source": "explicit"}
+        )
+    )
+    package.add_dependency(
+        Factory.create_dependency("other", {"version": ">=1.0", "source": "explicit"})
+    )
+
+    explicit_repo = Repository("explicit")
+    pool.add_repository(explicit_repo, priority=Priority.EXPLICIT)
+
+    package_extra = get_package("extra", "1.0")
+    repo.add_package(package_extra)  # extra only in default repo
+
+    for version in lib_versions:
+        package_lib = Package(
+            "lib", version, source_type="legacy", source_reference="explicit"
+        )
+
+        dep_extra = get_dependency("extra", ">=1.0")
+        package_lib.add_dependency(
+            Factory.create_dependency("extra", {"version": ">=1.0", "optional": True})
+        )
+        package_lib.extras = {canonicalize_name("extra"): [dep_extra]}
+
+        explicit_repo.add_package(package_lib)  # lib only in explicit repo
+
+    for version in other_versions:
+        package_other = Package(
+            "other", version, source_type="legacy", source_reference="explicit"
+        )
+        package_other.add_dependency(Factory.create_dependency("lib", ">=1.0"))
+        explicit_repo.add_package(package_other)  # other only in explicit repo
+
+    solver = Solver(package, pool, [], [], io)
+
+    transaction = solver.solve()
+
+    expected_lib = Package(
+        "lib", "2.0", source_type="legacy", source_reference="explicit"
+    )
+    expected_other = Package(
+        "other", "2.0", source_type="legacy", source_reference="explicit"
+    )
+    check_solver_result(
+        transaction,
+        [
+            {"job": "install", "package": get_package("extra", "1.0")},
+            {"job": "install", "package": expected_lib},
+            {"job": "install", "package": expected_other},
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    ("lib_versions", "other_versions"),
+    [
+        # number of versions influences which dependency is resolved first
+        (["1.0", "2.0"], ["1.0", "1.1", "2.0"]),  # more other than lib
+        (["1.0", "1.1", "2.0"], ["1.0", "2.0"]),  # more lib than other
+    ],
+)
+def test_direct_dependency_with_extras_from_explicit_and_transitive_dependency2(
+    package: ProjectPackage,
+    repo: Repository,
+    pool: RepositoryPool,
+    io: NullIO,
+    lib_versions: list[str],
+    other_versions: list[str],
+) -> None:
+    """
+    The root package depends on "lib[extra]" and "other", both with an explicit source.
+    "other" depends on "lib[other-extra]" (with another extra and of course without an
+    explicit source because explicit sources can only be defined in the root package).
+
+    The solver must not try to fetch "lib[other-extra]" from the default source
+    but from the explicit source defined for "lib[extra]".
+    """
+    package.add_dependency(
+        Factory.create_dependency(
+            "lib", {"version": ">=1.0", "extras": ["extra"], "source": "explicit"}
+        )
+    )
+    package.add_dependency(
+        Factory.create_dependency("other", {"version": ">=1.0", "source": "explicit"})
+    )
+
+    explicit_repo = Repository("explicit")
+    pool.add_repository(explicit_repo, priority=Priority.EXPLICIT)
+
+    package_extra = get_package("extra", "1.0")
+    repo.add_package(package_extra)  # extra only in default repo
+    package_other_extra = get_package("other-extra", "1.0")
+    repo.add_package(package_other_extra)  # extra only in default repo
+
+    for version in lib_versions:
+        package_lib = Package(
+            "lib", version, source_type="legacy", source_reference="explicit"
+        )
+
+        dep_extra = get_dependency("extra", ">=1.0")
+        package_lib.add_dependency(
+            Factory.create_dependency("extra", {"version": ">=1.0", "optional": True})
+        )
+
+        dep_other_extra = get_dependency("other-extra", ">=1.0")
+        package_lib.add_dependency(
+            Factory.create_dependency(
+                "other-extra", {"version": ">=1.0", "optional": True}
+            )
+        )
+        package_lib.extras = {
+            canonicalize_name("extra"): [dep_extra],
+            canonicalize_name("other-extra"): [dep_other_extra],
+        }
+
+        explicit_repo.add_package(package_lib)  # lib only in explicit repo
+
+    for version in other_versions:
+        package_other = Package(
+            "other", version, source_type="legacy", source_reference="explicit"
+        )
+        package_other.add_dependency(
+            Factory.create_dependency(
+                "lib", {"version": ">=1.0", "extras": ["other-extra"]}
+            )
+        )
+        explicit_repo.add_package(package_other)  # other only in explicit repo
+
+    solver = Solver(package, pool, [], [], io)
+
+    transaction = solver.solve()
+
+    expected_lib = Package(
+        "lib", "2.0", source_type="legacy", source_reference="explicit"
+    )
+    expected_other = Package(
+        "other", "2.0", source_type="legacy", source_reference="explicit"
+    )
+    check_solver_result(
+        transaction,
+        [
+            {"job": "install", "package": get_package("other-extra", "1.0")},
+            {"job": "install", "package": get_package("extra", "1.0")},
+            {"job": "install", "package": expected_lib},
+            {"job": "install", "package": expected_other},
+        ],
+    )
+
+
+@pytest.mark.parametrize("locked", [False, True])
+def test_multiple_constraints_explicit_source_transitive_locked_use_latest(
+    package: ProjectPackage,
+    repo: Repository,
+    pool: RepositoryPool,
+    io: NullIO,
+    locked: bool,
+) -> None:
+    """
+    The root package depends on
+     * lib[extra] == 1.0; sys_platform != "linux" with source=explicit1
+     * lib[extra] == 2.0; sys_platform == "linux" with source=explicit2
+     * other >= 1.0
+    "other" depends on "lib" (without an extra and of course without an explicit source
+    because explicit sources can only be defined in the root package).
+
+    If only "other" is in use_latest (equivalent to "poetry update other"),
+    the transitive dependency of "other" on "lib" is resolved before
+    the direct dependency on "lib[extra]" (if packages have been locked before).
+    We still have to make sure that the locked package is looked up in the explicit
+    source although the DependencyCache is not used for locked packages,
+    so we can't rely on it to propagate the correct source.
+    """
+    package.add_dependency(
+        Factory.create_dependency(
+            "lib",
+            {
+                "version": "1.0",
+                "extras": ["extra"],
+                "source": "explicit1",
+                "markers": "sys_platform != 'linux'",
+            },
+        )
+    )
+    package.add_dependency(
+        Factory.create_dependency(
+            "lib",
+            {
+                "version": "2.0",
+                "extras": ["extra"],
+                "source": "explicit2",
+                "markers": "sys_platform == 'linux'",
+            },
+        )
+    )
+    package.add_dependency(Factory.create_dependency("other", {"version": ">=1.0"}))
+
+    explicit_repo1 = Repository("explicit1")
+    pool.add_repository(explicit_repo1, priority=Priority.EXPLICIT)
+    explicit_repo2 = Repository("explicit2")
+    pool.add_repository(explicit_repo2, priority=Priority.EXPLICIT)
+
+    dep_extra = get_dependency("extra", ">=1.0")
+    dep_extra_opt = Factory.create_dependency(
+        "extra", {"version": ">=1.0", "optional": True}
+    )
+    package_lib1 = Package(
+        "lib", "1.0", source_type="legacy", source_reference="explicit1"
+    )
+    package_lib1.extras = {canonicalize_name("extra"): [dep_extra]}
+    package_lib1.add_dependency(dep_extra_opt)
+    explicit_repo1.add_package(package_lib1)
+    package_lib2 = Package(
+        "lib", "2.0", source_type="legacy", source_reference="explicit2"
+    )
+    package_lib2.extras = {canonicalize_name("extra"): [dep_extra]}
+    package_lib2.add_dependency(dep_extra_opt)
+    explicit_repo2.add_package(package_lib2)
+
+    package_extra = Package("extra", "1.0")
+    repo.add_package(package_extra)
+    package_other = Package("other", "1.5")
+    package_other.add_dependency(Factory.create_dependency("lib", ">=1.0"))
+    repo.add_package(package_other)
+
+    if locked:
+        locked_packages = [package_extra, package_lib1, package_lib2, package_other]
+        use_latest = [canonicalize_name("other")]
+    else:
+        locked_packages = []
+        use_latest = None
+    solver = Solver(package, pool, [], locked_packages, io)
+
+    transaction = solver.solve(use_latest=use_latest)
+
+    ops = check_solver_result(
+        transaction,
+        [
+            {"job": "install", "package": package_extra},
+            {"job": "install", "package": package_lib1},
+            {"job": "install", "package": package_lib2},
+            {"job": "install", "package": package_other},
+        ],
+    )
+    assert ops[1].package.source_reference == "explicit1"
+    assert ops[2].package.source_reference == "explicit2"
 
 
 def test_solver_discards_packages_with_empty_markers(
@@ -3357,7 +3831,9 @@ def test_solver_does_not_loop_indefinitely_on_duplicate_constraints_with_extras(
             "idna", {"version": ">=2.0.0", "markers": "extra == 'security'"}
         )
     )
-    requests.extras[canonicalize_name("security")] = [get_dependency("idna", ">=2.0.0")]
+    requests.extras = {
+        canonicalize_name("security"): [get_dependency("idna", ">=2.0.0")]
+    }
     idna = get_package("idna", "2.8")
 
     repo.add_package(requests)
@@ -3480,25 +3956,12 @@ def test_solver_synchronize_single(
     )
 
 
-@pytest.mark.skip(reason="Poetry no longer has critical package requirements")
-def test_solver_with_synchronization_keeps_critical_package(
-    package: ProjectPackage,
-    pool: RepositoryPool,
-    io: NullIO,
-) -> None:
-    package_pip = get_package("setuptools", "1.0")
-
-    solver = Solver(package, pool, [package_pip], [], io)
-    transaction = solver.solve()
-
-    check_solver_result(transaction, [])
-
-
 def test_solver_cannot_choose_another_version_for_directory_dependencies(
     solver: Solver,
     repo: Repository,
     package: ProjectPackage,
     fixture_dir: FixtureDirGetter,
+    tmp_path: Path,
 ) -> None:
     pendulum = get_package("pendulum", "2.0.3")
     demo = get_package("demo", "0.1.0")
@@ -3508,7 +3971,10 @@ def test_solver_cannot_choose_another_version_for_directory_dependencies(
     repo.add_package(demo)
     repo.add_package(pendulum)
 
-    path = (fixture_dir("git") / "github.com" / "demo" / "demo").as_posix()
+    project_dir = shutil.copytree(
+        fixture_dir("git") / "github.com" / "demo" / "demo", tmp_path / "project"
+    )
+    path = project_dir.as_posix()
 
     package.add_dependency(Factory.create_dependency("demo", {"path": path}))
     package.add_dependency(Factory.create_dependency("foo", "^1.2.3"))
@@ -3524,6 +3990,7 @@ def test_solver_cannot_choose_another_version_for_file_dependencies(
     repo: Repository,
     package: ProjectPackage,
     fixture_dir: FixtureDirGetter,
+    tmp_path: Path,
 ) -> None:
     pendulum = get_package("pendulum", "2.0.3")
     demo = get_package("demo", "0.0.8")
@@ -3533,7 +4000,11 @@ def test_solver_cannot_choose_another_version_for_file_dependencies(
     repo.add_package(demo)
     repo.add_package(pendulum)
 
-    path = (fixture_dir("distributions") / "demo-0.1.0-py2.py3-none-any.whl").as_posix()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    path = shutil.copy(
+        fixture_dir("distributions") / "demo-0.1.0-py2.py3-none-any.whl", project_dir
+    )
 
     package.add_dependency(Factory.create_dependency("demo", {"path": path}))
     package.add_dependency(Factory.create_dependency("foo", "^1.2.3"))
@@ -3572,13 +4043,18 @@ def test_solver_cannot_choose_another_version_for_url_dependencies(
     package: ProjectPackage,
     http: type[httpretty.httpretty],
     fixture_dir: FixtureDirGetter,
+    tmp_path: Path,
 ) -> None:
-    path = fixture_dir("distributions") / "demo-0.1.0-py2.py3-none-any.whl"
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    path = shutil.copy(
+        fixture_dir("distributions") / "demo-0.1.0-py2.py3-none-any.whl", project_dir
+    )
 
     http.register_uri(
         "GET",
-        "https://foo.bar/demo-0.1.0-py2.py3-none-any.whl",
-        body=path.read_bytes(),
+        "https://files.pythonhosted.org/demo-0.1.0-py2.py3-none-any.whl",
+        body=Path(path).read_bytes(),
         streaming=True,
     )
     pendulum = get_package("pendulum", "2.0.3")
@@ -3592,7 +4068,9 @@ def test_solver_cannot_choose_another_version_for_url_dependencies(
     package.add_dependency(
         Factory.create_dependency(
             "demo",
-            {"url": "https://foo.bar/distributions/demo-0.1.0-py2.py3-none-any.whl"},
+            {
+                "url": "https://files.pythonhosted.org/distributions/demo-0.1.0-py2.py3-none-any.whl"
+            },
         )
     )
     package.add_dependency(Factory.create_dependency("foo", "^1.2.3"))
@@ -3618,7 +4096,7 @@ def test_solver_cannot_choose_url_dependency_for_explicit_source(
             "demo",
             {
                 "markers": "sys_platform != 'darwin'",
-                "url": "https://foo.bar/distributions/demo-0.1.0-py2.py3-none-any.whl",
+                "url": "https://files.pythonhosted.org/distributions/demo-0.1.0-py2.py3-none-any.whl",
             },
         )
     )
@@ -3634,12 +4112,17 @@ def test_solver_cannot_choose_url_dependency_for_explicit_source(
     )
 
     package_pendulum = get_package("pendulum", "1.4.4")
-    package_demo = get_package("demo", "0.1.0")
+    package_demo = Package(
+        "demo",
+        "0.1.0",
+        source_type="legacy" if explicit_source else None,
+        source_reference="repo" if explicit_source else None,
+    )
     package_demo_url = Package(
         "demo",
         "0.1.0",
         source_type="url",
-        source_url="https://foo.bar/distributions/demo-0.1.0-py2.py3-none-any.whl",
+        source_url="https://files.pythonhosted.org/distributions/demo-0.1.0-py2.py3-none-any.whl",
     )
     # The url demo dependency depends on pendulum.
     repo.add_package(package_pendulum)
@@ -3793,7 +4276,7 @@ def test_solver_can_resolve_transitive_extras(
     requests.add_dependency(
         Factory.create_dependency("PyOpenSSL", {"version": ">=0.14", "optional": True})
     )
-    requests.extras[canonicalize_name("security")] = [dep]
+    requests.extras = {canonicalize_name("security"): [dep]}
     pyota = get_package("PyOTA", "2.1.0")
     pyota.add_dependency(
         Factory.create_dependency(
@@ -3834,9 +4317,9 @@ def test_solver_can_resolve_for_packages_with_missing_extras(
     django_anymail.add_dependency(
         Factory.create_dependency("boto3", {"version": "*", "optional": True})
     )
-    django_anymail.extras[canonicalize_name("amazon_ses")] = [
-        Factory.create_dependency("boto3", "*")
-    ]
+    django_anymail.extras = {
+        canonicalize_name("amazon_ses"): [Factory.create_dependency("boto3", "*")]
+    }
     django = get_package("django", "2.2.0")
     boto3 = get_package("boto3", "1.0.0")
     requests = get_package("requests", "2.24.0")
@@ -3889,8 +4372,13 @@ def test_solver_can_resolve_python_restricted_package_dependencies(
     )
 
 
+@pytest.mark.parametrize("virtualenv_before_pre_commit", [False, True])
 def test_solver_should_not_raise_errors_for_irrelevant_transitive_python_constraints(
-    solver: Solver, repo: Repository, package: ProjectPackage
+    solver: Solver,
+    repo: Repository,
+    package: ProjectPackage,
+    mocker: MockerFixture,
+    virtualenv_before_pre_commit: bool,
 ) -> None:
     package.python_versions = "~2.7 || ^3.5"
     set_package_python_versions(solver.provider, "~2.7 || ^3.5")
@@ -3927,6 +4415,24 @@ def test_solver_should_not_raise_errors_for_irrelevant_transitive_python_constra
     repo.add_package(pre_commit)
     repo.add_package(importlib_resources)
     repo.add_package(importlib_resources_3_2_1)
+
+    def patched_choose_next(unsatisfied: list[Dependency]) -> Dependency:
+        order = (
+            ("root", "virtualenv", "pre-commit", "importlib-resources")
+            if virtualenv_before_pre_commit
+            else ("root", "pre-commit", "virtualenv", "importlib-resources")
+        )
+        for preferred in order:
+            for dep in unsatisfied:
+                if dep.name == preferred:
+                    return dep
+        raise RuntimeError
+
+    mocker.patch(
+        "poetry.mixology.version_solver.VersionSolver._choose_next",
+        side_effect=patched_choose_next,
+    )
+
     transaction = solver.solve()
 
     check_solver_result(
@@ -3937,6 +4443,72 @@ def test_solver_should_not_raise_errors_for_irrelevant_transitive_python_constra
             {"job": "install", "package": virtualenv},
         ],
     )
+
+
+@pytest.mark.parametrize("numpy_before_pandas", [False, True])
+@pytest.mark.parametrize("conflict", [False, True])
+def test_solver_should_not_raise_errors_for_irrelevant_transitive_python_constraints2(
+    solver: Solver,
+    repo: Repository,
+    package: ProjectPackage,
+    mocker: MockerFixture,
+    numpy_before_pandas: bool,
+    conflict: bool,
+) -> None:
+    """This time with overrides."""
+    package.python_versions = ">=3.6.2, <3.10"
+    set_package_python_versions(solver.provider, ">=3.6.2, <3.10")
+    package.add_dependency(Factory.create_dependency("pandas", ">=1"))
+    package.add_dependency(
+        Factory.create_dependency("numpy", {"version": ">=1.20.0", "python": ">=3.7"})
+    )
+    package.add_dependency(
+        Factory.create_dependency("numpy", {"version": "*", "python": "<3.7"})
+    )
+
+    pandas = get_package("pandas", "1.1.5")
+    pandas.add_dependency(Factory.create_dependency("numpy", ">=1.15"))
+
+    numpy_19 = get_package("numpy", "1.19")
+    numpy_19.python_versions = ">=3.6"
+    numpy_20 = get_package("numpy", "1.20")
+    numpy_20.python_versions = ">=3.8" if conflict else ">=3.7"
+
+    repo.add_package(pandas)
+    repo.add_package(numpy_19)
+    repo.add_package(numpy_20)
+
+    def patched_choose_next(unsatisfied: list[Dependency]) -> Dependency:
+        order = (
+            ("root", "pandas", "numpy")
+            if numpy_before_pandas
+            else ("root", "numpy", "pandas")
+        )
+        for preferred in order:
+            for dep in unsatisfied:
+                if dep.name == preferred:
+                    return dep
+        raise RuntimeError
+
+    mocker.patch(
+        "poetry.mixology.version_solver.VersionSolver._choose_next",
+        side_effect=patched_choose_next,
+    )
+
+    if conflict:
+        with pytest.raises(SolverProblemError):
+            solver.solve()
+    else:
+        transaction = solver.solve()
+
+        check_solver_result(
+            transaction,
+            [
+                {"job": "install", "package": numpy_19},
+                {"job": "install", "package": numpy_20},
+                {"job": "install", "package": pandas},
+            ],
+        )
 
 
 @pytest.mark.parametrize("is_locked", [False, True])
@@ -4026,7 +4598,7 @@ def test_solver_does_not_update_ref_of_locked_vcs_package(
         Factory.create_dependency("demo", {"git": "https://github.com/demo/demo.git"})
     )
 
-    # transient dependencies of demo
+    # transitive dependencies of demo
     pendulum = get_package("pendulum", "2.0.3")
     repo.add_package(pendulum)
 
@@ -4072,7 +4644,7 @@ def test_solver_does_not_fetch_locked_vcs_package_with_ref(
         Factory.create_dependency("demo", {"git": "https://github.com/demo/demo.git"})
     )
 
-    # transient dependencies of demo
+    # transitive dependencies of demo
     pendulum = get_package("pendulum", "2.0.3")
     repo.add_package(pendulum)
 
@@ -4089,6 +4661,7 @@ def test_solver_direct_origin_dependency_with_extras_requested_by_other_package(
     repo: Repository,
     package: ProjectPackage,
     fixture_dir: FixtureDirGetter,
+    tmp_path: Path,
 ) -> None:
     """
     Another package requires the same dependency with extras that is required
@@ -4104,7 +4677,11 @@ def test_solver_direct_origin_dependency_with_extras_requested_by_other_package(
     repo.add_package(pendulum)
     repo.add_package(cleo)
 
-    path = (fixture_dir("git") / "github.com" / "demo" / "demo").as_posix()
+    project_dir = shutil.copytree(
+        fixture_dir("git") / "github.com" / "demo" / "demo",
+        tmp_path / "project",
+    )
+    path = project_dir.as_posix()
 
     # project requires path dependency of demo while demo-foo requires demo[foo]
     package.add_dependency(Factory.create_dependency("demo", {"path": path}))
@@ -4246,8 +4823,7 @@ def test_solver_yanked_warning(
     assert "The locked version 2 for bar is a yanked version." in error
     assert (
         "The locked version 3 for baz is a yanked version. Reason for being yanked:"
-        " just wrong"
-        in error
+        " just wrong" in error
     )
     assert error.count("is a yanked version") == 2
     assert error.count("Reason for being yanked") == 1
@@ -4321,4 +4897,222 @@ def test_update_with_use_latest_vs_lock(
             {"job": "install", "package": package_b3},
             {"job": "install", "package": package_a1},
         ],
+    )
+
+
+@pytest.mark.parametrize("with_extra", [False, True])
+def test_solver_resolves_duplicate_dependency_in_extra(
+    package: ProjectPackage,
+    pool: RepositoryPool,
+    repo: Repository,
+    io: NullIO,
+    with_extra: bool,
+) -> None:
+    """
+    Without extras, a newer version of B can be chosen than with extras.
+    See https://github.com/python-poetry/poetry/issues/8380.
+    """
+    constraint: dict[str, Any] = {"version": "*"}
+    if with_extra:
+        constraint["extras"] = ["foo"]
+    package.add_dependency(Factory.create_dependency("A", constraint))
+
+    package_a = get_package("A", "1.0")
+    package_b1 = get_package("B", "1.0")
+    package_b2 = get_package("B", "2.0")
+
+    dep = get_dependency("B", ">=1.0")
+    package_a.add_dependency(dep)
+
+    dep_extra = get_dependency("B", "^1.0", optional=True)
+    dep_extra.marker = parse_marker("extra == 'foo'")
+    package_a.extras = {canonicalize_name("foo"): [dep_extra]}
+    package_a.add_dependency(dep_extra)
+
+    repo.add_package(package_a)
+    repo.add_package(package_b1)
+    repo.add_package(package_b2)
+
+    solver = Solver(package, pool, [], [], io)
+    transaction = solver.solve()
+
+    check_solver_result(
+        transaction,
+        (
+            [
+                {"job": "install", "package": package_b1 if with_extra else package_b2},
+                {"job": "install", "package": package_a},
+            ]
+        ),
+    )
+
+
+def test_solver_resolves_conflicting_dependency_in_root_extra(
+    package: ProjectPackage,
+    pool: RepositoryPool,
+    repo: Repository,
+    io: NullIO,
+) -> None:
+    package_a1 = get_package("A", "1.0")
+    package_a2 = get_package("A", "2.0")
+
+    dep = get_dependency("A", {"version": "1.0", "markers": "extra != 'foo'"})
+    package.add_dependency(dep)
+
+    dep_extra = get_dependency("A", "2.0", optional=True)
+    dep_extra._in_extras = [canonicalize_name("foo")]
+    package.extras = {canonicalize_name("foo"): [dep_extra]}
+    package.add_dependency(dep_extra)
+
+    repo.add_package(package_a1)
+    repo.add_package(package_a2)
+
+    solver = Solver(package, pool, [], [], io)
+    transaction = solver.solve()
+
+    check_solver_result(
+        transaction,
+        (
+            [
+                {"job": "install", "package": package_a1},
+                {"job": "install", "package": package_a2},
+            ]
+        ),
+    )
+    solved_packages = transaction.get_solved_packages()
+    assert solved_packages[package_a1].markers["main"] == parse_marker("extra != 'foo'")
+    assert solved_packages[package_a2].markers["main"] == parse_marker("extra == 'foo'")
+
+
+def test_solver_resolves_conflicting_dependency_in_root_extras(
+    package: ProjectPackage,
+    pool: RepositoryPool,
+    repo: Repository,
+    io: NullIO,
+) -> None:
+    package_a1 = get_package("A", "1.0")
+    package_a2 = get_package("A", "2.0")
+
+    dep_extra1 = get_dependency(  # extra == 'foo' is implicit via _in_extras!
+        "A", {"version": "1.0", "markers": "extra != 'bar'"}, optional=True
+    )
+    dep_extra1._in_extras = [canonicalize_name("foo")]
+    package.add_dependency(dep_extra1)
+
+    dep_extra2 = get_dependency(  # extra == 'bar' is implicit via _in_extras!
+        "A", {"version": "2.0", "markers": "extra != 'foo'"}, optional=True
+    )
+    dep_extra2._in_extras = [canonicalize_name("bar")]
+    package.extras = {
+        canonicalize_name("foo"): [dep_extra1],
+        canonicalize_name("bar"): [dep_extra2],
+    }
+    package.add_dependency(dep_extra1)
+    package.add_dependency(dep_extra2)
+
+    repo.add_package(package_a1)
+    repo.add_package(package_a2)
+
+    solver = Solver(package, pool, [], [], io)
+    transaction = solver.solve()
+
+    check_solver_result(
+        transaction,
+        (
+            [
+                {"job": "install", "package": package_a1},
+                {"job": "install", "package": package_a2},
+            ]
+        ),
+    )
+    solved_packages = transaction.get_solved_packages()
+    assert solved_packages[package_a1].markers["main"] == parse_marker(
+        "extra != 'bar' and extra == 'foo'"
+    )
+    assert solved_packages[package_a2].markers["main"] == parse_marker(
+        "extra != 'foo' and extra == 'bar'"
+    )
+
+
+@pytest.mark.parametrize("with_extra", [False, True])
+def test_solver_resolves_duplicate_dependency_in_root_extra_for_installation(
+    package: ProjectPackage,
+    pool: RepositoryPool,
+    repo: Repository,
+    io: NullIO,
+    with_extra: bool,
+) -> None:
+    """
+    Without extras, a newer version of A can be chosen than with root extras.
+    """
+    extra = [canonicalize_name("foo")] if with_extra else []
+
+    package_a1 = get_package("A", "1.0")
+    package_a2 = get_package("A", "2.0")
+
+    dep = get_dependency("A", ">=1.0")
+    package.add_dependency(dep)
+
+    dep_extra = get_dependency("A", "^1.0", optional=True)
+    dep_extra.marker = parse_marker("extra == 'foo'")
+    package.extras = {canonicalize_name("foo"): [dep_extra]}
+    package.add_dependency(dep_extra)
+
+    repo.add_package(package_a1)
+    repo.add_package(package_a2)
+
+    solver = Solver(
+        package, pool, [], [package_a1, package_a2], io, active_root_extras=extra
+    )
+    with solver.use_environment(MockEnv()):
+        transaction = solver.solve()
+
+    check_solver_result(
+        transaction,
+        (
+            [
+                {"job": "install", "package": package_a1 if with_extra else package_a2},
+            ]
+        ),
+    )
+
+
+def test_solver_resolves_duplicate_dependencies_with_restricted_extras(
+    package: ProjectPackage,
+    pool: RepositoryPool,
+    repo: Repository,
+    io: NullIO,
+) -> None:
+    package.add_dependency(
+        Factory.create_dependency("A", {"version": "*", "extras": ["foo"]})
+    )
+
+    package_a = get_package("A", "1.0")
+    package_b1 = get_package("B", "1.0")
+    package_b2 = get_package("B", "2.0")
+
+    dep1 = get_dependency("B", "^1.0", optional=True)
+    dep1.marker = parse_marker("sys_platform == 'win32' and extra == 'foo'")
+    dep2 = get_dependency("B", "^2.0", optional=True)
+    dep2.marker = parse_marker("sys_platform == 'linux' and extra == 'foo'")
+    package_a.extras = {canonicalize_name("foo"): [dep1, dep2]}
+    package_a.add_dependency(dep1)
+    package_a.add_dependency(dep2)
+
+    repo.add_package(package_a)
+    repo.add_package(package_b1)
+    repo.add_package(package_b2)
+
+    solver = Solver(package, pool, [], [], io)
+    transaction = solver.solve()
+
+    check_solver_result(
+        transaction,
+        (
+            [
+                {"job": "install", "package": package_b1},
+                {"job": "install", "package": package_b2},
+                {"job": "install", "package": package_a},
+            ]
+        ),
     )

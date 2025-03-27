@@ -1,3 +1,4 @@
-0001-Accept-Python-version-string-with-a-at-the-end.patch
-skip-test-with-prefer-active-python-key.patch
-feat-platforemdirs-version
+0001-Apply-workaround-to-fix-httpretty-with-urllib-2.3.patch
+fix-env-manager.patch
+fix-tests.patch
+increase-sleep-time-in-threading-test.patch

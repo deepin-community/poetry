@@ -1,27 +1,33 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import os
 import re
 
 from copy import deepcopy
+from json import JSONDecodeError
 from pathlib import Path
 from typing import TYPE_CHECKING
 from typing import Any
 from typing import ClassVar
 
+from packaging.utils import NormalizedName
 from packaging.utils import canonicalize_name
 
 from poetry.config.dict_config_source import DictConfigSource
 from poetry.config.file_config_source import FileConfigSource
 from poetry.locations import CONFIG_DIR
 from poetry.locations import DEFAULT_CACHE_DIR
+from poetry.locations import data_dir
 from poetry.toml import TOMLFile
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from collections.abc import Mapping
+    from collections.abc import Sequence
 
     from poetry.config.config_source import ConfigSource
 
@@ -31,11 +37,42 @@ def boolean_validator(val: str) -> bool:
 
 
 def boolean_normalizer(val: str) -> bool:
-    return val in ["true", "1"]
+    return val.lower() in ["true", "1"]
 
 
 def int_normalizer(val: str) -> int:
     return int(val)
+
+
+def build_config_setting_validator(val: str) -> bool:
+    try:
+        value = build_config_setting_normalizer(val)
+    except JSONDecodeError:
+        return False
+
+    if not isinstance(value, dict):
+        return False
+
+    for key, item in value.items():
+        # keys should be string
+        if not isinstance(key, str):
+            return False
+
+        # items are allowed to be a string
+        if isinstance(item, str):
+            continue
+
+        # list items should only contain strings
+        is_valid_list = isinstance(item, list) and all(isinstance(i, str) for i in item)
+        if not is_valid_list:
+            return False
+
+    return True
+
+
+def build_config_setting_normalizer(val: str) -> Mapping[str, str | Sequence[str]]:
+    value: Mapping[str, str | Sequence[str]] = json.loads(val)
+    return value
 
 
 @dataclasses.dataclass
@@ -107,6 +144,7 @@ _default_config: Config | None = None
 class Config:
     default_config: ClassVar[dict[str, Any]] = {
         "cache-dir": str(DEFAULT_CACHE_DIR),
+        "data-dir": str(data_dir()),
         "virtualenvs": {
             "create": True,
             "in-project": None,
@@ -114,33 +152,35 @@ class Config:
             "options": {
                 "always-copy": False,
                 "system-site-packages": False,
-                # we default to False here in order to prevent development environment
-                # breakages for IDEs etc. as when working in these environments
-                # assumptions are often made about virtual environments having pip and
-                # setuptools.
                 "no-pip": False,
-                "no-setuptools": False,
             },
-            "prefer-active-python": False,
+            "use-poetry-python": False,
             "prompt": "{project_name}-py{python_version}",
         },
-        "experimental": {
-            "system-git-client": False,
+        "requests": {
+            "max-retries": 0,
         },
         "installer": {
-            "modern-installation": True,
+            "re-resolve": True,
             "parallel": True,
             "max-workers": None,
             "no-binary": None,
+            "only-binary": None,
+            "build-config-settings": {},
+        },
+        "python": {"installation-dir": os.path.join("{data-dir}", "python")},
+        "solver": {
+            "lazy-wheel": True,
+        },
+        "system-git-client": False,
+        "keyring": {
+            "enabled": True,
         },
     }
 
-    def __init__(
-        self, use_environment: bool = True, base_dir: Path | None = None
-    ) -> None:
+    def __init__(self, use_environment: bool = True) -> None:
         self._config = deepcopy(self.default_config)
         self._use_environment = use_environment
-        self._base_dir = base_dir
         self._config_source: ConfigSource = DictConfigSource()
         self._auth_config_source: ConfigSource = DictConfigSource()
 
@@ -208,6 +248,26 @@ class Config:
 
         return repositories
 
+    @staticmethod
+    def _get_environment_build_config_settings() -> Mapping[
+        NormalizedName, Mapping[str, str | Sequence[str]]
+    ]:
+        build_config_settings = {}
+        pattern = re.compile(r"POETRY_INSTALLER_BUILD_CONFIG_SETTINGS_(?P<name>[^.]+)")
+
+        for env_key in os.environ:
+            if match := pattern.match(env_key):
+                if not build_config_setting_validator(os.environ[env_key]):
+                    logger.debug(
+                        "Invalid value set for environment variable %s", env_key
+                    )
+                    continue
+                build_config_settings[canonicalize_name(match.group("name"))] = (
+                    build_config_setting_normalizer(os.environ[env_key])
+                )
+
+        return build_config_settings
+
     @property
     def repository_cache_directory(self) -> Path:
         return Path(self.get("cache-dir")).expanduser() / "cache" / "repositories"
@@ -223,11 +283,37 @@ class Config:
             path = Path(self.get("cache-dir")) / "virtualenvs"
         return Path(path).expanduser()
 
+    @property
+    def python_installation_dir(self) -> Path:
+        path = self.get("python.installation-dir")
+        if path is None:
+            path = Path(self.get("data-dir")) / "python"
+        return Path(path).expanduser()
+
+    @property
+    def installer_max_workers(self) -> int:
+        # This should be directly handled by ThreadPoolExecutor
+        # however, on some systems the number of CPUs cannot be determined
+        # (it raises a NotImplementedError), so, in this case, we assume
+        # that the system only has one CPU.
+        try:
+            default_max_workers = (os.cpu_count() or 1) + 4
+        except NotImplementedError:
+            default_max_workers = 5
+
+        desired_max_workers = self.get("installer.max-workers")
+        if desired_max_workers is None:
+            return default_max_workers
+        return min(default_max_workers, int(desired_max_workers))
+
     def get(self, setting_name: str, default: Any = None) -> Any:
         """
         Retrieve a setting value.
         """
         keys = setting_name.split(".")
+        build_config_settings: Mapping[
+            NormalizedName, Mapping[str, str | Sequence[str]]
+        ] = {}
 
         # Looking in the environment if the setting
         # is set via a POETRY_* environment variable
@@ -238,17 +324,35 @@ class Config:
                 if repositories:
                     return repositories
 
-            env = "POETRY_" + "_".join(k.upper().replace("-", "_") for k in keys)
-            env_value = os.getenv(env)
-            if env_value is not None:
-                return self.process(self._get_normalizer(setting_name)(env_value))
+            build_config_settings_key = "installer.build-config-settings"
+            if setting_name == build_config_settings_key or setting_name.startswith(
+                f"{build_config_settings_key}."
+            ):
+                build_config_settings = self._get_environment_build_config_settings()
+            else:
+                env = "POETRY_" + "_".join(k.upper().replace("-", "_") for k in keys)
+                env_value = os.getenv(env)
+                if env_value is not None:
+                    return self.process(self._get_normalizer(setting_name)(env_value))
 
         value = self._config
+
+        # merge installer build config settings from the environment
+        for package_name in build_config_settings:
+            value["installer"]["build-config-settings"][package_name] = (
+                build_config_settings[package_name]
+            )
+
         for key in keys:
             if key not in value:
                 return self.process(default)
 
             value = value[key]
+
+        if self._use_environment and isinstance(value, dict):
+            # this is a configuration table, it is likely that we missed env vars
+            # in order to capture them recurse, eg: virtualenvs.options
+            return {k: self.get(f"{setting_name}.{k}") for k in value}
 
         return self.process(value)
 
@@ -274,22 +378,31 @@ class Config:
             "virtualenvs.create",
             "virtualenvs.in-project",
             "virtualenvs.options.always-copy",
+            "virtualenvs.options.no-pip",
             "virtualenvs.options.system-site-packages",
-            "virtualenvs.options.prefer-active-python",
-            "experimental.system-git-client",
-            "installer.modern-installation",
+            "virtualenvs.use-poetry-python",
+            "installer.re-resolve",
             "installer.parallel",
+            "solver.lazy-wheel",
+            "system-git-client",
+            "keyring.enabled",
         }:
             return boolean_normalizer
 
         if name == "virtualenvs.path":
             return lambda val: str(Path(val))
 
-        if name == "installer.max-workers":
+        if name in {
+            "installer.max-workers",
+            "requests.max-retries",
+        }:
             return int_normalizer
 
-        if name == "installer.no-binary":
+        if name in ["installer.no-binary", "installer.only-binary"]:
             return PackageFilterPolicy.normalize
+
+        if name.startswith("installer.build-config-settings."):
+            return build_config_setting_normalizer
 
         return lambda val: val
 

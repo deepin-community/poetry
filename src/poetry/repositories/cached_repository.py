@@ -25,7 +25,7 @@ class CachedRepository(Repository, ABC):
     CACHE_VERSION = parse_constraint("2.0.0")
 
     def __init__(
-        self, name: str, disable_cache: bool = False, config: Config | None = None
+        self, name: str, *, disable_cache: bool = False, config: Config | None = None
     ) -> None:
         super().__init__(name)
         self._disable_cache = disable_cache
@@ -35,8 +35,7 @@ class CachedRepository(Repository, ABC):
     @abstractmethod
     def _get_release_info(
         self, name: NormalizedName, version: Version
-    ) -> dict[str, Any]:
-        ...
+    ) -> dict[str, Any]: ...
 
     def get_release_info(self, name: NormalizedName, version: Version) -> PackageInfo:
         """
@@ -67,12 +66,7 @@ class CachedRepository(Repository, ABC):
 
         return PackageInfo.load(cached)
 
-    def package(
-        self,
-        name: str,
-        version: Version,
-        extras: list[str] | None = None,
-    ) -> Package:
+    def package(self, name: str, version: Version) -> Package:
         return self.get_release_info(canonicalize_name(name), version).to_package(
-            name=name, extras=extras
+            name=name
         )

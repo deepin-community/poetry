@@ -1,0 +1,27 @@
+#!/bin/sh
+set -efu
+
+mkdir -p $AUTOPKGTEST_TMP/poetry-simple-test
+
+cat >> "$AUTOPKGTEST_TMP/poetry-simple-test/pyproject.toml" <<EOF
+[tool.poetry]
+name = "test"
+version = "0.1.0"
+description = "Test"
+authors = ["Emmanuel Arias <eamanu@debian.org>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+EOF
+
+cd "$AUTOPKGTEST_TMP"/poetry-simple-test
+
+poetry add requests
+poetry update
+

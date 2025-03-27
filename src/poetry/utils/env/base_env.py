@@ -7,28 +7,34 @@ import subprocess
 import sys
 import sysconfig
 
+from abc import ABC
+from abc import abstractmethod
+from functools import cached_property
 from pathlib import Path
 from subprocess import CalledProcessError
 from typing import TYPE_CHECKING
 from typing import Any
 
+from installer.utils import SCHEME_NAMES
 from virtualenv.seed.wheels.embed import get_embed_wheel
 
 from poetry.utils.env.exceptions import EnvCommandError
 from poetry.utils.env.site_packages import SitePackages
 from poetry.utils.helpers import get_real_windows_path
+from poetry.utils.helpers import is_dir_writable
 
 
 if TYPE_CHECKING:
     from packaging.tags import Tag
-    from poetry.core.constraints.version import Version
     from poetry.core.version.markers import BaseMarker
     from virtualenv.seed.wheels.util import Wheel
 
     from poetry.utils.env.generic_env import GenericEnv
 
+    PythonVersion = tuple[int, int, int, str, int]
 
-class Env:
+
+class Env(ABC):
     """
     An abstract Python environment.
     """
@@ -53,16 +59,17 @@ class Env:
 
         self._base = base or path
 
-        self._marker_env: dict[str, Any] | None = None
-        self._pip_version: Version | None = None
         self._site_packages: SitePackages | None = None
-        self._paths: dict[str, str] | None = None
         self._supported_tags: list[Tag] | None = None
         self._purelib: Path | None = None
         self._platlib: Path | None = None
         self._script_dirs: list[Path] | None = None
 
         self._embedded_pip_path: Path | None = None
+
+    @property
+    def bin_dir(self) -> Path:
+        return self._bin_dir
 
     @property
     def path(self) -> Path:
@@ -73,8 +80,8 @@ class Env:
         return self._base
 
     @property
-    def version_info(self) -> tuple[int, int, int, str, int]:
-        version_info: tuple[int, int, int, str, int] = self.marker_env["version_info"]
+    def version_info(self) -> PythonVersion:
+        version_info: PythonVersion = self.marker_env["version_info"]
         return version_info
 
     @property
@@ -89,12 +96,9 @@ class Env:
         """
         return Path(self._bin(self._executable))
 
-    @property
+    @cached_property
     def marker_env(self) -> dict[str, Any]:
-        if self._marker_env is None:
-            self._marker_env = self.get_marker_env()
-
-        return self._marker_env
+        return self.get_marker_env()
 
     @property
     def parent_env(self) -> GenericEnv:
@@ -171,22 +175,12 @@ class Env:
         return os.name
 
     @property
-    def pip_version(self) -> Version:
-        if self._pip_version is None:
-            self._pip_version = self.get_pip_version()
-
-        return self._pip_version
-
-    @property
     def site_packages(self) -> SitePackages:
         if self._site_packages is None:
-            # we disable write checks if no user site exist
-            fallbacks = [self.usersite] if self.usersite else []
             self._site_packages = SitePackages(
                 self.purelib,
                 self.platlib,
-                fallbacks,
-                skip_write_checks=not fallbacks,
+                self.fallbacks,
             )
         return self._site_packages
 
@@ -219,8 +213,100 @@ class Env:
 
         return self._platlib
 
+    @cached_property
+    def fallbacks(self) -> list[Path]:
+        paths = [Path(path) for path in self.paths.get("fallbacks", [])]
+        paths += [self.usersite] if self.usersite else []
+        return paths
+
+    def set_paths(
+        self,
+        purelib: str | Path | None = None,
+        platlib: str | Path | None = None,
+        userbase: str | Path | None = None,
+        usersite: str | Path | None = None,
+    ) -> None:
+        """
+        A cached property aware way to set environment paths during runtime.
+
+        In some cases, like in `PluginManager._install()` method, paths are modified during execution. Direct
+        modification of `self.paths` is not safe as caches relying on are not invalidated. This helper method
+        ensures that we clear the relevant caches why paths are modified.
+        """
+        if purelib:
+            self.paths["purelib"] = str(purelib)
+
+        if platlib:
+            self.paths["platlib"] = str(platlib)
+
+        if userbase:
+            self.paths["userbase"] = str(userbase)
+
+        if usersite:
+            self.paths["usersite"] = str(usersite)
+
+        # clear cached properties using the env paths
+        self.__dict__.pop("fallbacks", None)
+        self.__dict__.pop("scheme_dict", None)
+
+    @cached_property
+    def scheme_dict(self) -> dict[str, str]:
+        """
+        This property exists to allow cases where system environment paths are not writable and
+        user site is enabled. This enables us to ensure packages (wheels) are correctly installed
+        into directories where the current user can write to.
+
+        If all candidates in `self.paths` is writable, no modification is made. If at least one path is not writable
+        and all generated writable candidates are indeed writable, these are used instead. If any candidate is not
+        writable, the original paths are returned.
+
+        Alternative writable candidates are generated by replacing discovered prefix, with "userbase"
+        if available. The original prefix is computed as the common path prefix of "scripts" and "purelib".
+        For example, given `{ "purelib": "/usr/local/lib/python3.13/site-packages", "scripts": "/usr/local/bin",
+        "userbase": "/home/user/.local" }`; the candidate "purelib" path would be
+        `/home/user/.local/lib/python3.13/site-packages`.
+        """
+        paths = self.paths.copy()
+
+        if (
+            not self.is_venv()
+            and paths.get("userbase")
+            and ("scripts" in paths and "purelib" in paths)
+        ):
+            overrides: dict[str, str] = {}
+
+            try:
+                base_path = os.path.commonpath([paths["scripts"], paths["purelib"]])
+            except ValueError:
+                return paths
+
+            scheme_names = [key for key in SCHEME_NAMES if key in self.paths]
+
+            for key in scheme_names:
+                if not is_dir_writable(path=Path(paths[key]), create=True):
+                    # there is at least one path that is not writable
+                    break
+            else:
+                # all paths are writable, return early
+                return paths
+
+            for key in scheme_names:
+                candidate = paths[key].replace(base_path, paths["userbase"])
+                if not is_dir_writable(path=Path(candidate), create=True):
+                    # at least one candidate is not writable, we cannot do much here
+                    return paths
+
+                overrides[key] = candidate
+
+            paths.update(overrides)
+
+        return paths
+
+    def _get_lib_dirs(self) -> list[Path]:
+        return [self.purelib, self.platlib, *self.fallbacks]
+
     def is_path_relative_to_lib(self, path: Path) -> bool:
-        for lib_path in [self.purelib, self.platlib]:
+        for lib_path in self._get_lib_dirs():
             with contextlib.suppress(ValueError):
                 path.relative_to(lib_path)
                 return True
@@ -228,25 +314,23 @@ class Env:
         return False
 
     @property
-    def sys_path(self) -> list[str]:
-        raise NotImplementedError()
+    @abstractmethod
+    def sys_path(self) -> list[str]: ...
 
-    @property
+    @cached_property
     def paths(self) -> dict[str, str]:
-        if self._paths is None:
-            self._paths = self.get_paths()
+        paths = self.get_paths()
 
-            if self.is_venv():
-                # We copy pip's logic here for the `include` path
-                self._paths["include"] = str(
-                    self.path.joinpath(
-                        "include",
-                        "site",
-                        f"python{self.version_info[0]}.{self.version_info[1]}",
-                    )
+        if self.is_venv():
+            # We copy pip's logic here for the `include` path
+            paths["include"] = str(
+                self.path.joinpath(
+                    "include",
+                    "site",
+                    f"python{self.version_info[0]}.{self.version_info[1]}",
                 )
-
-        return self._paths
+            )
+        return paths
 
     @property
     def supported_tags(self) -> list[Tag]:
@@ -267,14 +351,8 @@ class Env:
 
         return Path(sys.prefix)
 
-    def get_version_info(self) -> tuple[Any, ...]:
-        raise NotImplementedError()
-
-    def get_python_implementation(self) -> str:
-        raise NotImplementedError()
-
-    def get_marker_env(self) -> dict[str, Any]:
-        raise NotImplementedError()
+    @abstractmethod
+    def get_marker_env(self) -> dict[str, Any]: ...
 
     def get_pip_command(self, embedded: bool = False) -> list[str]:
         if embedded or not Path(self._bin(self._pip_executable)).exists():
@@ -282,14 +360,11 @@ class Env:
         # run as module so that pip can update itself on Windows
         return [str(self.python), "-m", "pip"]
 
-    def get_supported_tags(self) -> list[Tag]:
-        raise NotImplementedError()
+    @abstractmethod
+    def get_supported_tags(self) -> list[Tag]: ...
 
-    def get_pip_version(self) -> Version:
-        raise NotImplementedError()
-
-    def get_paths(self) -> dict[str, str]:
-        raise NotImplementedError()
+    @abstractmethod
+    def get_paths(self) -> dict[str, str]: ...
 
     def is_valid_for_marker(self, marker: BaseMarker) -> bool:
         valid: bool = marker.validate(self.marker_env)
@@ -319,13 +394,20 @@ class Env:
         return self._run(cmd, **kwargs)
 
     def run_python_script(self, content: str, **kwargs: Any) -> str:
+        # Options Used:
+        #     -I        : Run Python in isolated mode. (#6627)
+        #     -W ignore : Suppress warnings.
+        #
+        # TODO: Consider replacing (-I) with (-EP) once support for managing Python <3.11 environments dropped.
+        # This is useful to prevent user site being disabled over zealously.
+
         return self.run(
             self._executable,
             "-I",
             "-W",
             "ignore",
-            "-",
-            input_=content,
+            "-c",
+            content,
             stderr=subprocess.PIPE,
             **kwargs,
         )
@@ -335,32 +417,21 @@ class Env:
         Run a command inside the Python environment.
         """
         call = kwargs.pop("call", False)
-        input_ = kwargs.pop("input_", None)
         env = kwargs.pop("env", dict(os.environ))
         stderr = kwargs.pop("stderr", subprocess.STDOUT)
 
         try:
-            if input_:
-                output: str = subprocess.run(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=stderr,
-                    input=input_,
-                    check=True,
-                    env=env,
-                    text=True,
-                    **kwargs,
-                ).stdout
-            elif call:
+            if call:
                 assert stderr != subprocess.PIPE
                 subprocess.check_call(cmd, stderr=stderr, env=env, **kwargs)
                 output = ""
             else:
+                encoding = "locale" if sys.version_info >= (3, 10) else None
                 output = subprocess.check_output(
-                    cmd, stderr=stderr, env=env, text=True, **kwargs
+                    cmd, stderr=stderr, env=env, text=True, encoding=encoding, **kwargs
                 )
         except CalledProcessError as e:
-            raise EnvCommandError(e, input=input_)
+            raise EnvCommandError(e)
 
         return output
 
@@ -376,8 +447,8 @@ class Env:
         exe.communicate()
         return exe.returncode
 
-    def is_venv(self) -> bool:
-        raise NotImplementedError()
+    @abstractmethod
+    def is_venv(self) -> bool: ...
 
     @property
     def script_dirs(self) -> list[Path]:

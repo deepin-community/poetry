@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 import functools
 import logging
@@ -13,14 +12,19 @@ from typing import TYPE_CHECKING
 from typing import Any
 
 import requests
+import requests.adapters
 import requests.auth
 import requests.exceptions
 
 from cachecontrol import CacheControlAdapter
 from cachecontrol.caches import FileCache
+from requests_toolbelt import user_agent
 
+from poetry.__version__ import __version__
 from poetry.config.config import Config
-from poetry.exceptions import PoetryException
+from poetry.console.exceptions import ConsoleMessage
+from poetry.console.exceptions import PoetryRuntimeError
+from poetry.exceptions import PoetryError
 from poetry.utils.constants import REQUESTS_TIMEOUT
 from poetry.utils.constants import RETRY_AFTER_HEADER
 from poetry.utils.constants import STATUS_FORCELIST
@@ -75,28 +79,20 @@ class AuthenticatorRepositoryConfig:
     def certs(self, config: Config) -> RepositoryCertificateConfig:
         return RepositoryCertificateConfig.create(self.name, config)
 
-    @property
-    def http_credential_keys(self) -> list[str]:
-        return [self.url, self.netloc, self.name]
-
     def get_http_credentials(
-        self, password_manager: PasswordManager, username: str | None = None
+        self, password_manager: PasswordManager
     ) -> HTTPAuthCredential:
         # try with the repository name via the password manager
-        credential = HTTPAuthCredential(
-            **(password_manager.get_http_auth(self.name) or {})
-        )
+        credential = password_manager.get_http_auth(self.name)
 
-        if credential.password is None:
+        if credential.password is not None:
+            return credential
+
+        if password_manager.use_keyring:
             # fallback to url and netloc based keyring entries
-            credential = password_manager.keyring.get_credential(
+            credential = password_manager.get_credential(
                 self.url, self.netloc, username=credential.username
             )
-
-            if credential.password is not None:
-                return HTTPAuthCredential(
-                    username=credential.username, password=credential.password
-                )
 
         return credential
 
@@ -108,24 +104,22 @@ class Authenticator:
         io: IO | None = None,
         cache_id: str | None = None,
         disable_cache: bool = False,
-        pool_size: int = 10,
+        pool_size: int = requests.adapters.DEFAULT_POOLSIZE,
     ) -> None:
         self._config = config or Config.create()
         self._io = io
         self._sessions_for_netloc: dict[str, requests.Session] = {}
         self._credentials: dict[str, HTTPAuthCredential] = {}
         self._certs: dict[str, RepositoryCertificateConfig] = {}
-        self._configured_repositories: dict[
-            str, AuthenticatorRepositoryConfig
-        ] | None = None
+        self._configured_repositories: (
+            dict[str, AuthenticatorRepositoryConfig] | None
+        ) = None
         self._password_manager = PasswordManager(self._config)
         self._cache_control = (
             FileCache(
-                str(
-                    self._config.repository_cache_directory
-                    / (cache_id or "_default_cache")
-                    / "_http"
-                ),
+                self._config.repository_cache_directory
+                / (cache_id or "_default_cache")
+                / "_http"
             )
             if not disable_cache
             else None
@@ -134,9 +128,11 @@ class Authenticator:
             self._get_repository_config_for_url
         )
         self._pool_size = pool_size
+        self._user_agent = user_agent("poetry", __version__)
 
     def create_session(self) -> requests.Session:
         session = requests.Session()
+        session.headers["User-Agent"] = self._user_agent
 
         if self._cache_control is None:
             return session
@@ -166,8 +162,7 @@ class Authenticator:
     def close(self) -> None:
         for session in self._sessions_for_netloc.values():
             if session is not None:
-                with contextlib.suppress(AttributeError):
-                    session.close()
+                session.close()
 
     def __del__(self) -> None:
         self.close()
@@ -237,7 +232,28 @@ class Authenticator:
                 resp = session.send(prepared_request, **send_kwargs)
             except (requests.exceptions.ConnectionError, OSError) as e:
                 if is_last_attempt:
-                    raise e
+                    parsed_url = urllib.parse.urlsplit(url)
+                    exc = PoetryRuntimeError.create(
+                        reason=f"<error>All attempts to connect to <c1>{parsed_url.netloc}</> failed.</>",
+                        exception=e,
+                    )
+                    exc.append(
+                        ConsoleMessage(
+                            "the server is not responding to requests at the moment\n"
+                            "the hostname cannot be resolved by your DNS\n"
+                            "your network is not connected to the internet\n"
+                        )
+                        .indent("    - ")
+                        .make_section("Probable Causes")
+                        .wrap("warning")
+                    )
+                    exc.append(
+                        ConsoleMessage(
+                            f"<b>Note:</> The path requested was <c1>{parsed_url.path}</>.",
+                            debug=True,
+                        )
+                    )
+                    raise exc
             else:
                 if resp.status_code not in STATUS_FORCELIST or is_last_attempt:
                     if raise_for_status:
@@ -252,7 +268,7 @@ class Authenticator:
                 continue
 
         # this should never really be hit under any sane circumstance
-        raise PoetryException("Failed HTTP {} request", method.upper())
+        raise PoetryError(f"Failed HTTP request: {method.upper()} {url}")
 
     def _get_backoff(self, response: requests.Response | None, attempt: int) -> float:
         if response is not None:
@@ -265,19 +281,23 @@ class Authenticator:
     def get(self, url: str, **kwargs: Any) -> requests.Response:
         return self.request("get", url, **kwargs)
 
+    def head(self, url: str, **kwargs: Any) -> requests.Response:
+        kwargs.setdefault("allow_redirects", False)
+        return self.request("head", url, **kwargs)
+
     def post(self, url: str, **kwargs: Any) -> requests.Response:
         return self.request("post", url, **kwargs)
 
     def _get_credentials_for_repository(
-        self, repository: AuthenticatorRepositoryConfig, username: str | None = None
+        self, repository: AuthenticatorRepositoryConfig
     ) -> HTTPAuthCredential:
         # cache repository credentials by repository url to avoid multiple keyring
         # backend queries when packages are being downloaded from the same source
-        key = f"{repository.url}#username={username or ''}"
+        key = repository.url
 
         if key not in self._credentials:
             self._credentials[key] = repository.get_http_credentials(
-                password_manager=self._password_manager, username=username
+                password_manager=self._password_manager
             )
 
         return self._credentials[key]
@@ -296,7 +316,7 @@ class Authenticator:
         if credential.password is None:
             parsed_url = urllib.parse.urlsplit(url)
             netloc = parsed_url.netloc
-            credential = self._password_manager.keyring.get_credential(
+            credential = self._password_manager.get_credential(
                 url, netloc, username=credential.username
             )
 
@@ -347,9 +367,7 @@ class Authenticator:
     def get_pypi_token(self, name: str) -> str | None:
         return self._password_manager.get_pypi_token(name)
 
-    def get_http_auth(
-        self, name: str, username: str | None = None
-    ) -> HTTPAuthCredential | None:
+    def get_http_auth(self, name: str) -> HTTPAuthCredential | None:
         if name == "pypi":
             repository = AuthenticatorRepositoryConfig(
                 name, "https://upload.pypi.org/legacy/"
@@ -359,9 +377,7 @@ class Authenticator:
                 return None
             repository = self.configured_repositories[name]
 
-        return self._get_credentials_for_repository(
-            repository=repository, username=username
-        )
+        return self._get_credentials_for_repository(repository=repository)
 
     def get_certs_for_repository(self, name: str) -> RepositoryCertificateConfig:
         if name.lower() == "pypi" or name not in self.configured_repositories:

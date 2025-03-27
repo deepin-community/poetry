@@ -1,0 +1,32 @@
+From: Emmanuel Arias <eamanu@debian.org>
+Date: Tue, 21 Jan 2025 20:24:19 -0300
+Subject: Apply workaround to fix httpretty with urllib>=2.3
+
+Apply from https://github.com/PyGithub/PyGithub/pull/3102 to fix
+error in httpretty using urllib >= 2.3.
+---
+ tests/conftest.py | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+--- a/tests/conftest.py
++++ b/tests/conftest.py
+@@ -94,6 +94,19 @@
+ ]
+ 
+ 
++getattr = httpretty.core.fakesock.socket.__getattr__
++def patched_getattr(self, name):
++    def shutdown(how: int):
++        pass
++
++    if name == "shutdown" and not httpretty.core.httpretty.allow_net_connect and not self.truesock:
++        return shutdown
++
++    return getattr(self, name)
++
++httpretty.core.fakesock.socket.__getattr__ = patched_getattr
++
++
+ def pytest_addoption(parser: Parser) -> None:
+     parser.addoption(
+         "--integration",

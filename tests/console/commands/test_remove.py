@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 from typing import Any
+from typing import Callable
 from typing import cast
 
 import pytest
@@ -31,23 +32,101 @@ if TYPE_CHECKING:
 @pytest.fixture
 def poetry_with_up_to_date_lockfile(
     project_factory: ProjectFactory, fixture_dir: FixtureDirGetter
-) -> Poetry:
-    source = fixture_dir("up_to_date_lock")
+) -> Callable[[str], Poetry]:
+    def get_poetry(fixture_name: str) -> Poetry:
+        source = fixture_dir(fixture_name)
 
-    poetry = project_factory(
-        name="foobar",
-        pyproject_content=(source / "pyproject.toml").read_text(encoding="utf-8"),
-        poetry_lock_content=(source / "poetry.lock").read_text(encoding="utf-8"),
-    )
+        poetry = project_factory(
+            name="foobar",
+            pyproject_content=(source / "pyproject.toml").read_text(encoding="utf-8"),
+            poetry_lock_content=(source / "poetry.lock").read_text(encoding="utf-8"),
+        )
 
-    assert isinstance(poetry.locker, TestLocker)
-    poetry.locker.locked(True)
-    return poetry
+        assert isinstance(poetry.locker, TestLocker)
+        poetry.locker.locked(True)
+        return poetry
+
+    return get_poetry
 
 
 @pytest.fixture()
 def tester(command_tester_factory: CommandTesterFactory) -> CommandTester:
     return command_tester_factory("remove")
+
+
+def test_remove_from_project_and_poetry(
+    tester: CommandTester,
+    app: PoetryTestApplication,
+    repo: TestRepository,
+    installed: Repository,
+) -> None:
+    repo.add_package(Package("foo", "2.0.0"))
+    repo.add_package(Package("bar", "1.0.0"))
+
+    pyproject: dict[str, Any] = app.poetry.file.read()
+
+    project_dependencies: dict[str, Any] = tomlkit.parse(
+        """\
+[project]
+dependencies = [
+    "foo>=2.0",
+    "bar>=1.0",
+]
+"""
+    )
+
+    poetry_dependencies: dict[str, Any] = tomlkit.parse(
+        """\
+[tool.poetry.dependencies]
+foo = "^2.0.0"
+bar = "^1.0.0"
+
+"""
+    )
+
+    pyproject["project"]["dependencies"] = project_dependencies["project"][
+        "dependencies"
+    ]
+    pyproject["tool"]["poetry"]["dependencies"] = poetry_dependencies["tool"]["poetry"][
+        "dependencies"
+    ]
+    pyproject = cast("TOMLDocument", pyproject)
+    app.poetry.file.write(pyproject)
+
+    app.poetry.package.add_dependency(Factory.create_dependency("foo", "^2.0.0"))
+    app.poetry.package.add_dependency(Factory.create_dependency("bar", "^1.0.0"))
+
+    tester.execute("foo")
+
+    pyproject = app.poetry.file.read()
+    pyproject = cast("dict[str, Any]", pyproject)
+    project_dependencies = pyproject["project"]["dependencies"]
+    assert "foo>=2.0" not in project_dependencies
+    assert "bar>=1.0" in project_dependencies
+    poetry_dependencies = pyproject["tool"]["poetry"]["dependencies"]
+    assert "foo" not in poetry_dependencies
+    assert "bar" in poetry_dependencies
+
+    expected_project_string = """\
+dependencies = [
+    "bar>=1.0",
+]
+"""
+    expected_poetry_string = """\
+
+[tool.poetry.dependencies]
+bar = "^1.0.0"
+
+"""
+    pyproject = cast("TOMLDocument", pyproject)
+    string_content = pyproject.as_string()
+    if "\r\n" in string_content:
+        # consistent line endings
+        expected_project_string = expected_project_string.replace("\n", "\r\n")
+        expected_poetry_string = expected_poetry_string.replace("\n", "\r\n")
+
+    assert expected_project_string in string_content
+    assert expected_poetry_string in string_content
 
 
 def test_remove_without_specific_group_removes_from_all_groups(
@@ -65,12 +144,14 @@ def test_remove_without_specific_group_removes_from_all_groups(
 
     pyproject: dict[str, Any] = app.poetry.file.read()
 
-    groups_content: dict[str, Any] = tomlkit.parse("""\
+    groups_content: dict[str, Any] = tomlkit.parse(
+        """\
 [tool.poetry.group.bar.dependencies]
 foo = "^2.0.0"
 baz = "^1.0.0"
 
-""")
+"""
+    )
     pyproject["tool"]["poetry"]["dependencies"]["foo"] = "^2.0.0"
     pyproject["tool"]["poetry"]["group"] = groups_content["tool"]["poetry"]["group"]
     pyproject = cast("TOMLDocument", pyproject)
@@ -108,7 +189,7 @@ baz = "^1.0.0"
     assert expected in string_content
 
 
-def test_remove_without_specific_group_removes_from_specific_groups(
+def test_remove_with_specific_group_removes_from_specific_groups(
     tester: CommandTester,
     app: PoetryTestApplication,
     repo: TestRepository,
@@ -123,12 +204,14 @@ def test_remove_without_specific_group_removes_from_specific_groups(
 
     pyproject: dict[str, Any] = app.poetry.file.read()
 
-    groups_content: dict[str, Any] = tomlkit.parse("""\
+    groups_content: dict[str, Any] = tomlkit.parse(
+        """\
 [tool.poetry.group.bar.dependencies]
 foo = "^2.0.0"
 baz = "^1.0.0"
 
-""")
+"""
+    )
     pyproject["tool"]["poetry"]["dependencies"]["foo"] = "^2.0.0"
     pyproject["tool"]["poetry"]["group"] = groups_content["tool"]["poetry"]["group"]
     pyproject = cast("TOMLDocument", pyproject)
@@ -165,7 +248,7 @@ baz = "^1.0.0"
     assert expected in string_content
 
 
-def test_remove_does_not_live_empty_groups(
+def test_remove_does_not_keep_empty_groups(
     tester: CommandTester,
     app: PoetryTestApplication,
     repo: TestRepository,
@@ -180,12 +263,14 @@ def test_remove_does_not_live_empty_groups(
 
     content: dict[str, Any] = app.poetry.file.read()
 
-    groups_content: dict[str, Any] = tomlkit.parse("""\
+    groups_content: dict[str, Any] = tomlkit.parse(
+        """\
 [tool.poetry.group.bar.dependencies]
 foo = "^2.0.0"
 baz = "^1.0.0"
 
-""")
+"""
+    )
     content["tool"]["poetry"]["dependencies"]["foo"] = "^2.0.0"
     content["tool"]["poetry"]["group"] = groups_content["tool"]["poetry"]["group"]
     content = cast("TOMLDocument", content)
@@ -226,12 +311,14 @@ def test_remove_canonicalized_named_removes_dependency_correctly(
 
     pyproject: dict[str, Any] = app.poetry.file.read()
 
-    groups_content: dict[str, Any] = tomlkit.parse("""\
+    groups_content: dict[str, Any] = tomlkit.parse(
+        """\
 [tool.poetry.group.bar.dependencies]
 foo-bar = "^2.0.0"
 baz = "^1.0.0"
 
-""")
+"""
+    )
     pyproject["tool"]["poetry"]["dependencies"]["foo-bar"] = "^2.0.0"
     pyproject["tool"]["poetry"].value._insert_after(
         "dependencies", "group", groups_content["tool"]["poetry"]["group"]
@@ -271,6 +358,44 @@ baz = "^1.0.0"
     assert expected in string_content
 
 
+def test_remove_package_does_not_exist(
+    tester: CommandTester,
+    app: PoetryTestApplication,
+    repo: TestRepository,
+    command_tester_factory: CommandTesterFactory,
+) -> None:
+    repo.add_package(Package("foo", "2.0.0"))
+
+    original_content = app.poetry.file.read().as_string()
+
+    with pytest.raises(ValueError) as e:
+        tester.execute("foo")
+
+    assert str(e.value) == "The following packages were not found: foo"
+    assert app.poetry.file.read().as_string() == original_content
+
+
+def test_remove_package_no_dependencies(
+    tester: CommandTester,
+    app: PoetryTestApplication,
+    repo: TestRepository,
+    command_tester_factory: CommandTesterFactory,
+) -> None:
+    repo.add_package(Package("foo", "2.0.0"))
+
+    pyproject: dict[str, Any] = app.poetry.file.read()
+    assert "dependencies" not in pyproject["project"]
+    del pyproject["tool"]["poetry"]["dependencies"]
+    pyproject = cast("TOMLDocument", pyproject)
+    app.poetry.file.write(pyproject)
+    app.poetry.package._dependency_groups = {}
+
+    with pytest.raises(ValueError) as e:
+        tester.execute("foo")
+
+    assert str(e.value) == "The following packages were not found: foo"
+
+
 def test_remove_command_should_not_write_changes_upon_installer_errors(
     tester: CommandTester,
     app: PoetryTestApplication,
@@ -291,33 +416,41 @@ def test_remove_command_should_not_write_changes_upon_installer_errors(
     assert app.poetry.file.read().as_string() == original_content
 
 
+@pytest.mark.parametrize(
+    "fixture_name", ["up_to_date_lock", "up_to_date_lock_non_package"]
+)
 def test_remove_with_dry_run_keep_files_intact(
-    poetry_with_up_to_date_lockfile: Poetry,
+    fixture_name: str,
+    poetry_with_up_to_date_lockfile: Callable[[str], Poetry],
     repo: TestRepository,
     command_tester_factory: CommandTesterFactory,
 ) -> None:
-    tester = command_tester_factory("remove", poetry=poetry_with_up_to_date_lockfile)
+    poetry = poetry_with_up_to_date_lockfile(fixture_name)
+    tester = command_tester_factory("remove", poetry=poetry)
 
-    original_pyproject_content = poetry_with_up_to_date_lockfile.file.read()
-    original_lockfile_content = poetry_with_up_to_date_lockfile._locker.lock_data
+    original_pyproject_content = poetry.file.read()
+    original_lockfile_content = poetry._locker.lock_data
 
     repo.add_package(get_package("docker", "4.3.1"))
 
     tester.execute("docker --dry-run")
 
-    assert poetry_with_up_to_date_lockfile.file.read() == original_pyproject_content
-    assert (
-        poetry_with_up_to_date_lockfile._locker.lock_data == original_lockfile_content
-    )
+    assert poetry.file.read() == original_pyproject_content
+    assert poetry._locker.lock_data == original_lockfile_content
 
 
+@pytest.mark.parametrize(
+    "fixture_name", ["up_to_date_lock", "up_to_date_lock_non_package"]
+)
 def test_remove_performs_uninstall_op(
-    poetry_with_up_to_date_lockfile: Poetry,
+    fixture_name: str,
+    poetry_with_up_to_date_lockfile: Callable[[str], Poetry],
     command_tester_factory: CommandTesterFactory,
     installed: Repository,
 ) -> None:
     installed.add_package(get_package("docker", "4.3.1"))
-    tester = command_tester_factory("remove", poetry=poetry_with_up_to_date_lockfile)
+    poetry = poetry_with_up_to_date_lockfile(fixture_name)
+    tester = command_tester_factory("remove", poetry=poetry)
 
     tester.execute("docker")
 
@@ -327,7 +460,7 @@ Resolving dependencies...
 
 Package operations: 0 installs, 0 updates, 1 removal
 
-  • Removing docker (4.3.1)
+  - Removing docker (4.3.1)
 
 Writing lock file
 """
@@ -335,13 +468,18 @@ Writing lock file
     assert tester.io.fetch_output() == expected
 
 
+@pytest.mark.parametrize(
+    "fixture_name", ["up_to_date_lock", "up_to_date_lock_non_package"]
+)
 def test_remove_with_lock_does_not_perform_uninstall_op(
-    poetry_with_up_to_date_lockfile: Poetry,
+    fixture_name: str,
+    poetry_with_up_to_date_lockfile: Callable[[str], Poetry],
     command_tester_factory: CommandTesterFactory,
     installed: Repository,
 ) -> None:
     installed.add_package(get_package("docker", "4.3.1"))
-    tester = command_tester_factory("remove", poetry=poetry_with_up_to_date_lockfile)
+    poetry = poetry_with_up_to_date_lockfile(fixture_name)
+    tester = command_tester_factory("remove", poetry=poetry)
 
     tester.execute("docker --lock")
 

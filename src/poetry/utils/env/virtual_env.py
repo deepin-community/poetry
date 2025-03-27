@@ -6,24 +6,22 @@ import re
 
 from contextlib import contextmanager
 from copy import deepcopy
+from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING
 from typing import Any
-
-from packaging.tags import Tag
-from poetry.core.constraints.version import Version
 
 from poetry.utils.env.base_env import Env
 from poetry.utils.env.script_strings import GET_BASE_PREFIX
 from poetry.utils.env.script_strings import GET_ENVIRONMENT_INFO
 from poetry.utils.env.script_strings import GET_PATHS
-from poetry.utils.env.script_strings import GET_PYTHON_VERSION
 from poetry.utils.env.script_strings import GET_SYS_PATH
-from poetry.utils.env.script_strings import GET_SYS_TAGS
 
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+    from packaging.tags import Tag
 
 
 class VirtualEnv(Env):
@@ -48,36 +46,32 @@ class VirtualEnv(Env):
         paths: list[str] = json.loads(output)
         return paths
 
-    def get_version_info(self) -> tuple[Any, ...]:
-        output = self.run_python_script(GET_PYTHON_VERSION)
-        assert isinstance(output, str)
-
-        return tuple(int(s) for s in output.strip().split("."))
-
-    def get_python_implementation(self) -> str:
-        implementation: str = self.marker_env["platform_python_implementation"]
-        return implementation
-
     def get_supported_tags(self) -> list[Tag]:
-        output = self.run_python_script(GET_SYS_TAGS)
+        from packaging.tags import compatible_tags
+        from packaging.tags import cpython_tags
+        from packaging.tags import generic_tags
 
-        return [Tag(*t) for t in json.loads(output)]
+        python = self.version_info[:3]
+        interpreter_name = self.marker_env["interpreter_name"]
+        interpreter_version = self.marker_env["interpreter_version"]
+
+        if interpreter_name == "pp":
+            interpreter = "pp3"
+        elif interpreter_name == "cp":
+            interpreter = f"{interpreter_name}{interpreter_version}"
+        else:
+            interpreter = None
+
+        return [
+            *(cpython_tags(python) if interpreter_name == "cp" else generic_tags()),
+            *compatible_tags(python, interpreter=interpreter),
+        ]
 
     def get_marker_env(self) -> dict[str, Any]:
         output = self.run_python_script(GET_ENVIRONMENT_INFO)
 
         env: dict[str, Any] = json.loads(output)
         return env
-
-    def get_pip_version(self) -> Version:
-        output = self.run_pip("--version")
-        output = output.strip()
-
-        m = re.match("pip (.+?)(?: from .+)?$", output)
-        if not m:
-            return Version.parse("0.0")
-
-        return Version.parse(m.group(1))
 
     def get_paths(self) -> dict[str, str]:
         output = self.run_python_script(GET_PATHS)
@@ -133,3 +127,21 @@ class VirtualEnv(Env):
 
     def _updated_path(self) -> str:
         return os.pathsep.join([str(self._bin_dir), os.environ.get("PATH", "")])
+
+    @cached_property
+    def includes_system_site_packages(self) -> bool:
+        pyvenv_cfg = self._path / "pyvenv.cfg"
+        return pyvenv_cfg.exists() and (
+            re.search(
+                r"^\s*include-system-site-packages\s*=\s*true\s*$",
+                pyvenv_cfg.read_text(encoding="utf-8"),
+                re.IGNORECASE | re.MULTILINE,
+            )
+            is not None
+        )
+
+    def is_path_relative_to_lib(self, path: Path) -> bool:
+        return super().is_path_relative_to_lib(path) or (
+            self.includes_system_site_packages
+            and self.parent_env.is_path_relative_to_lib(path)
+        )
